@@ -34,14 +34,14 @@ namespace FaceAnalysis
 
         private void OnGUI()
         {
-            if (!visible || controller == null)
+            if (!visible || controller == null || !DeformableImage.FaceRuntimeUILayout.Left(0))
             {
                 return;
             }
 
             bodyStyle ??= new GUIStyle(GUI.skin.label)
             {
-                fontSize = fontSize,
+                fontSize = DeformableImage.FaceRuntimeUILayout.Enabled ? Mathf.Min(fontSize, 14) : fontSize,
                 wordWrap = true,
                 richText = false,
                 alignment = TextAnchor.UpperLeft
@@ -49,7 +49,8 @@ namespace FaceAnalysis
 
             float width = Mathf.Min(panelWidth, Screen.width - 24f);
             float height = Mathf.Min(panelHeight, Screen.height - 24f);
-            Rect panel = new Rect(12f, 12f, width, height);
+            Rect panel = DeformableImage.FaceRuntimeUILayout.Enabled
+                ? DeformableImage.FaceRuntimeUILayout.Panel(false, panelHeight) : new Rect(12f, 12f, width, height);
             GUI.Box(panel, "");
             GUILayout.BeginArea(new Rect(panel.x + 12f, panel.y + 10f, panel.width - 24f, panel.height - 20f));
             GUILayout.Label("基础面部数据（F6 隐藏/显示）", new GUIStyle(bodyStyle) { fontStyle = FontStyle.Bold });

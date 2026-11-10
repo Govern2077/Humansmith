@@ -761,18 +761,23 @@ namespace FaceAnalysis
             }
         }
 
+        private Vector2 runtimePanelScroll;
+
         private void OnGUI()
         {
-            if (!panelVisible || !Application.isPlaying)
+            if ((!panelVisible && !DeformableImage.FaceRuntimeUILayout.Enabled) || !Application.isPlaying
+                || !DeformableImage.FaceRuntimeUILayout.Right(2))
             {
                 return;
             }
 
-            Rect panel = new Rect(12f, 12f, panelWidth, 590f);
+            Rect panel = DeformableImage.FaceRuntimeUILayout.Enabled
+                ? DeformableImage.FaceRuntimeUILayout.Panel(true, 680f) : new Rect(12f, 12f, panelWidth, 590f);
             GUILayout.BeginArea(panel, GUI.skin.box);
+            runtimePanelScroll = GUILayout.BeginScrollView(runtimePanelScroll);
             GUILayout.Label("摄像头面部采集 / 活体动作验证");
             Texture preview = landmarkSource != null ? landmarkSource.CurrentInputTexture : null;
-            Rect previewRect = GUILayoutUtility.GetRect(panelWidth - 24f, 320f);
+            Rect previewRect = GUILayoutUtility.GetRect(panel.width - 24f, Mathf.Min(240f, panel.height * 0.4f));
             if (preview != null && IsCapturing)
             {
                 GUI.DrawTexture(previewRect, preview, ScaleMode.ScaleToFit, false);
@@ -807,6 +812,7 @@ namespace FaceAnalysis
 
             GUI.enabled = true;
             GUILayout.Label("F8：显示/隐藏采集面板");
+            GUILayout.EndScrollView();
             GUILayout.EndArea();
         }
 

@@ -212,7 +212,7 @@ namespace DeformableImage
 
         private void OnGUI()
         {
-            if (!showRuntimeToolStatus || !Application.isPlaying)
+            if (!showRuntimeToolStatus || !Application.isPlaying || !FaceRuntimeUILayout.Left(1))
             {
                 return;
             }
@@ -224,7 +224,7 @@ namespace DeformableImage
                         + transparentCutWidth.ToString("0.000")
                     : "1 Drag | 2 Inflate | 3 Pinch | 4 Cut";
             GUI.Box(
-                new Rect(12f, 12f, 620f, 82f),
+                FaceRuntimeUILayout.Enabled ? FaceRuntimeUILayout.Panel(false, 110f) : new Rect(12f, 12f, 620f, 82f),
                 "Active Tool: " + activeTool.ToString().ToUpperInvariant()
                 + "\n" + pinHint
                 + (activeTool == DeformationTool.Cut ? "\n" + lastCutStatus : string.Empty));

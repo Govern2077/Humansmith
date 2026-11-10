@@ -87,13 +87,13 @@ namespace DeformableImage
 
         private void OnGUI()
         {
-            if (!Application.isPlaying || !toolActive)
+            if (!Application.isPlaying || !toolActive || !FaceRuntimeUILayout.Left(1))
             {
                 return;
             }
 
             GUI.Box(
-                new Rect(12f, 102f, 620f, 64f),
+                FaceRuntimeUILayout.Enabled ? new Rect(12f, 174f, FaceRuntimeUILayout.Width, 100f) : new Rect(12f, 102f, 620f, 64f),
                 "Active Tool: BONE CLOSED CUT (5)"
                 + "\nLeft drag a closed lasso; yellow is preview."
                 + "\n" + lastStatus);

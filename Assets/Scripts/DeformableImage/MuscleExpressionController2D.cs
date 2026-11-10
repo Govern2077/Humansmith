@@ -907,7 +907,7 @@ namespace DeformableImage
 
         private void OnGUI()
         {
-            if (!Application.isPlaying)
+            if (!Application.isPlaying || !FaceRuntimeUILayout.Left(2))
             {
                 return;
             }
@@ -915,7 +915,7 @@ namespace DeformableImage
             if (showRuntimeStatus)
             {
                 GUI.Box(
-                    new Rect(12f, 100f, 700f, 112f),
+                    FaceRuntimeUILayout.Enabled ? FaceRuntimeUILayout.Panel(false, 200f) : new Rect(12f, 100f, 700f, 112f),
                     "Eyes: " + eyeChannelWeight.ToString("0.00")
                     + " | Smile: " + smileChannelWeight.ToString("0.00")
                     + " | Sad: " + sadnessChannelWeight.ToString("0.00")
@@ -930,7 +930,8 @@ namespace DeformableImage
 
             if (showRandomTwitchButton
                 && GUI.Button(
-                    new Rect(12f, showRuntimeStatus ? 218f : 100f, 240f, 34f),
+                    FaceRuntimeUILayout.Enabled ? new Rect(12f, showRuntimeStatus ? 264f : 54f, FaceRuntimeUILayout.Width, 34f)
+                        : new Rect(12f, showRuntimeStatus ? 218f : 100f, 240f, 34f),
                     randomTwitching
                         ? "停止随机肌肉抽搐 (F7)"
                         : "开始随机肌肉抽搐 (F7)"))

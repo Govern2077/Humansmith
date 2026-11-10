@@ -1351,16 +1351,21 @@ namespace FaceAnalysis
             return bounds;
         }
 
+        private Vector2 runtimePanelScroll;
+
         private void OnGUI()
         {
-            if (!panelVisible || !Application.isPlaying)
+            if ((!panelVisible && !DeformableImage.FaceRuntimeUILayout.Enabled) || !Application.isPlaying
+                || !DeformableImage.FaceRuntimeUILayout.Right(1))
             {
                 return;
             }
 
             GUILayout.BeginArea(
-                new Rect(Screen.width - panelWidth - 12f, 12f, panelWidth, 320f),
+                DeformableImage.FaceRuntimeUILayout.Enabled ? DeformableImage.FaceRuntimeUILayout.Panel(true, 470f)
+                    : new Rect(Screen.width - panelWidth - 12f, 12f, panelWidth, 320f),
                 GUI.skin.box);
+            runtimePanelScroll = GUILayout.BeginScrollView(runtimePanelScroll);
             GUILayout.Label("Player Photo → Rest Face");
             GUILayout.Label(playerPhoto != null
                 ? "Player Photo: " + playerPhoto.name
@@ -1401,6 +1406,7 @@ namespace FaceAnalysis
 
             GUI.enabled = true;
             GUILayout.Label("F7: show/hide this panel");
+            GUILayout.EndScrollView();
             GUILayout.EndArea();
         }
     }

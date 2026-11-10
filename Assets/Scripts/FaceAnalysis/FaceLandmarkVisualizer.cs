@@ -182,6 +182,7 @@ namespace FaceAnalysis
         private void OnGUI()
         {
             if (!visible
+                || DeformableImage.FaceRuntimeUILayout.Enabled
                 || !drawInputPreview
                 || mediaPipeSource == null
                 || mediaPipeSource.CurrentInputTexture == null)

@@ -414,6 +414,7 @@ GameObject:
   - component: {fileID: 643902631}
   - component: {fileID: 643902632}
   - component: {fileID: 643902633}
+  - component: {fileID: 643902634}
   m_Layer: 0
   m_Name: Deformable Double-Sided Image
   m_TagString: Untagged
@@ -55020,3 +55021,20 @@ SceneRoots:
   - {fileID: 1190820408}
   - {fileID: 19814640}
   - {fileID: 1801836304}
+
+--- !u!114 &643902634
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 643902625}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b9aa4b106bda45bb845985af39ca6041, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  targetWidthRatio: 1.15
+  applyKey: 290
+  restoreKey: 291
+  showMarkings: 1
