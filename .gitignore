@@ -107,3 +107,18 @@ InitTestScene*.unity*
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# Local tools and alternative version control metadata
+/.diversion/
+/.dotnet/
+/.dotnet_cli/
+/.dvignore
+
+# Local credentials
+.env
+.env.*
+!.env.example
+*.keystore
+*.pfx
+*.p12
+*.pem
