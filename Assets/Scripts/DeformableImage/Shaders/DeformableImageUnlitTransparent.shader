@@ -12,6 +12,13 @@ Shader "Deformable Image/Unlit Transparent"
         _DiffuseStrength ("Diffuse Strength", Range(0,2)) = 0.55
         _SpecularStrength ("Specular Strength", Range(0,1)) = 0.08
         _Smoothness ("Smoothness", Range(0.02,1)) = 0.28
+        _WrinkleMask ("Wrinkle Opacity Mask", 2D) = "black" {}
+        _WrinkleStrain ("Wrinkle Compression Field", 2D) = "black" {}
+        _WrinkleRegion ("Wrinkle UV Region", Vector) = (0.42,0.565,0.16,0.19)
+        _WrinkleTint ("Wrinkle Color", Color) = (0.19,0.09,0.065,1)
+        _WrinkleOpacity ("Wrinkle Opacity", Range(0,1)) = 0
+        _WrinklePreview ("Preview Wrinkle Mask", Float) = 0
+        _WrinkleUseSourceColor ("Use Colored Wrinkle Overlay", Float) = 0
     }
 
     SubShader
@@ -73,6 +80,13 @@ Shader "Deformable Image/Unlit Transparent"
             float _DiffuseStrength;
             float _SpecularStrength;
             float _Smoothness;
+            sampler2D _WrinkleMask;
+            sampler2D _WrinkleStrain;
+            float4 _WrinkleRegion;
+            fixed4 _WrinkleTint;
+            float _WrinkleOpacity;
+            float _WrinklePreview;
+            float _WrinkleUseSourceColor;
 
             VertexToFragment vert(AppData input)
             {
@@ -89,6 +103,27 @@ Shader "Deformable Image/Unlit Transparent"
             fixed4 frag(VertexToFragment input) : SV_Target
             {
                 fixed4 color = tex2D(_MainTex, input.uv) * _Color;
+                // Color-only wrinkle layer. Material UVs follow the deformed skin;
+                // source alpha, normals, geometry and shadow coverage remain unchanged.
+                if (_WrinkleOpacity > 0.0001)
+                {
+                    float2 wrinkleUv = (input.cutUv - _WrinkleRegion.xy) / max(_WrinkleRegion.zw, float2(0.001,0.001));
+                    float inside = step(0.0, wrinkleUv.x) * step(wrinkleUv.x, 1.0)
+                        * step(0.0, wrinkleUv.y) * step(wrinkleUv.y, 1.0);
+                    float border = min(min(wrinkleUv.x, 1.0 - wrinkleUv.x), min(wrinkleUv.y, 1.0 - wrinkleUv.y));
+                    // Full-image color layers share the skin texture's coordinates, including
+                    // sprite trimming and material tiling/offset. Region UVs belong only to
+                    // the compression field and the legacy localized grayscale mask.
+                    float2 sourceUv = lerp(wrinkleUv, input.uv, saturate(_WrinkleUseSourceColor));
+                    fixed4 wrinkle = tex2D(_WrinkleMask, sourceUv);
+                    float grayscaleMask = smoothstep(0.025, 0.7, wrinkle.r);
+                    float coloredMask = smoothstep(0.015, 0.12, max(wrinkle.r, max(wrinkle.g, wrinkle.b))) * wrinkle.a;
+                    float mask = lerp(grayscaleMask, coloredMask, saturate(_WrinkleUseSourceColor));
+                    float activation = lerp(tex2D(_WrinkleStrain, wrinkleUv).r, 1.0, saturate(_WrinklePreview));
+                    float opacity = saturate(mask * activation * _WrinkleOpacity * inside * smoothstep(0.0, 0.08, border));
+                    float3 wrinkleColor = lerp(_WrinkleTint.rgb, wrinkle.rgb, saturate(_WrinkleUseSourceColor));
+                    color.rgb = lerp(color.rgb, wrinkleColor, opacity);
+                }
                 fixed cutMask = tex2D(_CutMask, input.cutUv).r;
                 fixed cutVisual = tex2D(_CutVisualMask, input.cutUv).r;
                 color.a *= cutMask;

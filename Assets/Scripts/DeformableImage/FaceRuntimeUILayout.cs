@@ -22,7 +22,7 @@ namespace DeformableImage
             LeftTab = GUI.Toolbar(new Rect(12f, 12f, Width, 34f), LeftTab,
                 new[] { "面部数据", "操作工具", "表情" }, style);
             RightTab = GUI.Toolbar(new Rect(Screen.width - Width - 12f, 12f, Width, 34f), RightTab,
-                new[] { "术前标记", "照片", "摄像头" }, style);
+                new[] { "术前标记", "照片", "摄像头", "皱纹" }, style);
         }
     }
 }

@@ -415,6 +415,7 @@ GameObject:
   - component: {fileID: 643902632}
   - component: {fileID: 643902633}
   - component: {fileID: 643902634}
+  - component: {fileID: 643902635}
   m_Layer: 0
   m_Name: Deformable Double-Sided Image
   m_TagString: Untagged
@@ -5524,6 +5525,49 @@ MonoBehaviour:
   lastStatus: Baked the three openings into Skin, Fat and Muscle topology in 480
     ms. Runtime cutting is now skipped.
   editorBakeRequested: 0
+--- !u!114 &643902634
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 643902625}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b9aa4b106bda45bb845985af39ca6041, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  facialCurves: {fileID: 0}
+  targetWidthRatio: 1.15
+  applyKey: 290
+  restoreKey: 291
+  showMarkings: 1
+  markerWidth: 6
+  dashLength: 18
+  contrastOutline: 1
+  showOriginalCurve: 0
+--- !u!114 &643902635
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 643902625}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fca10eec560943fba6126011a7850df5, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  wrinkleMask: {fileID: 2800000, guid: 0693cd838d666aa4b98fbf1bc8152e90, type: 3}
+  useSourceColor: 1
+  effectEnabled: 1
+  opacity: 0.8
+  wrinkleTint: {r: 0.19, g: 0.09, b: 0.065, a: 1}
+  region: {x: 0, y: 0, z: 1, w: 1}
+  onsetCompression: 0.008
+  fullCompression: 0.12
+  response: 12
+  previewTexture: 0
 --- !u!1001 &647950772
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -7052,6 +7096,7 @@ MonoBehaviour:
   sadnessKey: 285
   angerKey: 286
   painKey: 287
+  randomTwitchKey: 288
   enableHotkeys: 1
   transitionDuration: 0.16
   initiallyOpenEyes: 0
@@ -7060,6 +7105,11 @@ MonoBehaviour:
   initiallyAngry: 0
   initiallyInPain: 0
   showRuntimeStatus: 1
+  initiallyRandomTwitching: 0
+  showRandomTwitchButton: 1
+  randomTwitchMinInterval: 0.08
+  randomTwitchMaxInterval: 0.38
+  randomTwitchIntensity: 1
   eyelidMuscleLift: 0.034
   eyeInfluenceHeight: 0.085
   leftOpenEyelidTarget:
@@ -55021,20 +55071,3 @@ SceneRoots:
   - {fileID: 1190820408}
   - {fileID: 19814640}
   - {fileID: 1801836304}
-
---- !u!114 &643902634
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 643902625}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: b9aa4b106bda45bb845985af39ca6041, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  targetWidthRatio: 1.15
-  applyKey: 290
-  restoreKey: 291
-  showMarkings: 1
