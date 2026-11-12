@@ -14,7 +14,11 @@ namespace DeformableImage
             Drag,
             Inflate,
             Pinch,
-            Cut
+            Cut,
+            SkinHook,
+            Retractor,
+            Dissector,
+            Suture
         }
 
         [Header("Input")]
@@ -32,7 +36,7 @@ namespace DeformableImage
         [SerializeField, Min(0.02f)] private float maximumBrushRadius = 3f;
 
         [Header("Cloth-like Dragging")]
-        [Tooltip("Only grabs this close to the visible Sprite outline may fold over and reveal the back image.")]
+        [Tooltip("Only grabs this close to an incision may fold over and reveal the back image. Original silhouette stays anchored.")]
         [SerializeField, Min(0.001f)] private float visibleEdgeGrabDistance = 0.2f;
         [Tooltip("Interior pulls are clamped to this fraction of the brush radius so the rest of the image remains anchored.")]
         [SerializeField, Range(0.05f, 0.45f)] private float maximumInteriorStretch = 0.32f;
@@ -106,9 +110,45 @@ namespace DeformableImage
 
         private DeformableImageMesh deformableMesh;
         private BoneSkinCoupler2D boneSkinCoupler;
+        private SurgicalInstrumentPrototype2D instruments;
+        private Vector2 toolPanelScroll;
+        private static readonly List<DeformableImageInteractor> ToolPanels = new List<DeformableImageInteractor>();
+        private static DeformableImageInteractor selectedLayer;
+        public static DeformableImageInteractor PanelOwner
+        {
+            get
+            {
+                DeformableImageInteractor first = null;
+                foreach (var tool in ToolPanels)
+                {
+                    if (tool == null || !tool.isActiveAndEnabled || !tool.showRuntimeToolStatus) continue;
+                    if (first == null) first = tool;
+                    var curves = tool.GetComponent<FacialFeaturePrecut2D>();
+                    if (curves != null && curves.SkinLayer == tool.deformableMesh) return tool;
+                }
+                return first;
+            }
+        }
+        public static DeformableImageInteractor SelectedLayer
+        {
+            get
+            {
+                if (selectedLayer == null || !selectedLayer.isActiveAndEnabled || !ToolPanels.Contains(selectedLayer)) selectedLayer = PanelOwner;
+                return selectedLayer;
+            }
+        }
+        public static bool HasToolPanel
+        {
+            get { return PanelOwner != null; }
+        }
+
+        private void OnEnable() { if (!ToolPanels.Contains(this)) ToolPanels.Add(this); }
+        private void OnDisable() { ToolPanels.Remove(this); }
         private Vector3[] operationStartVertices;
         private Vector3[] workingVertices;
         private int[] operationTriangles;
+        private bool[] operationOutlineAnchors;
+        private float[] operationFeatureStrengths;
         private float[] operationGeodesicDistances;
         private Vector3 operationStartLocalPoint;
         private Vector3 operationStartMousePosition;
@@ -130,7 +170,16 @@ namespace DeformableImage
         public DeformationTool ActiveTool
         {
             get { return activeTool; }
-            set { activeTool = value; }
+            set
+            {
+                if (activeTool == value && !BoneCutInteractor.IsAnyBoneToolActive) return;
+                BoneCutInteractor.DeactivateAllTools();
+                if (operationActive) EndOperation();
+                if (cutActive) CancelCut();
+                StopRebound();
+                if (instruments != null) instruments.CancelPendingInput();
+                activeTool = value;
+            }
         }
 
         public float BrushRadius
@@ -160,6 +209,9 @@ namespace DeformableImage
             {
                 targetCamera = Camera.main;
             }
+            instruments = GetComponent<SurgicalInstrumentPrototype2D>();
+            if (instruments == null) instruments = gameObject.AddComponent<SurgicalInstrumentPrototype2D>();
+            instruments.Configure(this, deformableMesh, targetCamera);
         }
 
         private void OnValidate()
@@ -212,26 +264,85 @@ namespace DeformableImage
 
         private void OnGUI()
         {
-            if (!showRuntimeToolStatus || !Application.isPlaying || !FaceRuntimeUILayout.Left(1))
+            if (!showRuntimeToolStatus || !Application.isPlaying || !FaceRuntimeUILayout.Left(1) || PanelOwner != this)
             {
                 return;
             }
 
-            string pinHint = activeTool == DeformationTool.Drag
-                ? "Release: rebound | Middle mouse: pin"
-                : activeTool == DeformationTool.Cut
-                    ? "Left drag: draw cut | Mouse wheel: cut width "
-                        + transparentCutWidth.ToString("0.000")
-                    : "1 Drag | 2 Inflate | 3 Pinch | 4 Cut";
-            GUI.Box(
-                FaceRuntimeUILayout.Enabled ? FaceRuntimeUILayout.Panel(false, 110f) : new Rect(12f, 12f, 620f, 82f),
-                "Active Tool: " + activeTool.ToString().ToUpperInvariant()
-                + "\n" + pinHint
-                + (activeTool == DeformationTool.Cut ? "\n" + lastCutStatus : string.Empty));
+            GUILayout.BeginArea(FaceRuntimeUILayout.Panel(false, Screen.height - 66f), GUI.skin.box);
+            toolPanelScroll = GUILayout.BeginScrollView(toolPanelScroll);
+            GUILayout.Label("操作工具 · 点击选择", FaceRuntimeUILayout.WrappedLabel);
+            GUILayout.BeginHorizontal();
+            foreach (var layer in ToolPanels)
+            {
+                if (layer == null || !layer.isActiveAndEnabled || !layer.showRuntimeToolStatus) continue;
+                string name = layer == PanelOwner ? "皮肤" : layer.gameObject.name.ToLowerInvariant().Contains("muscle") ? "肌肉" : layer.gameObject.name.ToLowerInvariant().Contains("fat") ? "脂肪" : layer.gameObject.name;
+                if (GUILayout.Toggle(SelectedLayer == layer, name, FaceRuntimeUILayout.ToolButton) && SelectedLayer != layer)
+                {
+                    if (SelectedLayer != null) SelectedLayer.CancelCurrentToolOperation();
+                    BoneCutInteractor.DeactivateAllTools();
+                    selectedLayer = layer;
+                }
+            }
+            GUILayout.EndHorizontal();
+            if (SelectedLayer != null) SelectedLayer.DrawToolPanel();
+            GUILayout.EndScrollView(); GUILayout.EndArea();
+        }
+
+        private void DrawToolPanel()
+        {
+            int selected = GUILayout.SelectionGrid(BoneCutInteractor.IsAnyBoneToolActive ? -1 : (int)activeTool,
+                new[] { "拖拽", "膨胀", "挤压", "组织切割", "皮钩", "牵开器", "剥离器", "缝合" }, 2, FaceRuntimeUILayout.ToolButton);
+            if (selected >= 0) ActiveTool = (DeformationTool)selected;
+            BoneCutInteractor.DrawToolButtons(SelectBoneTool);
+            GUILayout.Space(6f);
+            GUILayout.Label("作用半径：" + brushRadius.ToString("0.00") + "（滚轮调节）", FaceRuntimeUILayout.WrappedLabel);
+            if (BoneCutInteractor.IsAnyBoneToolActive)
+                GUILayout.Label("当前为骨骼切割。左键画闭合轮廓；点击上方任意组织工具即可返回。", FaceRuntimeUILayout.WrappedLabel);
+            else if (activeTool == DeformationTool.Cut)
+                GUILayout.Label("左键拖动切割；滚轮调节切口宽度 " + transparentCutWidth.ToString("0.000") + "\n" + lastCutStatus, FaceRuntimeUILayout.WrappedLabel);
+            else if (activeTool == DeformationTool.Drag)
+                GUILayout.Label("左键拖拽，松手回弹；中键固定。", FaceRuntimeUILayout.WrappedLabel);
+            else if (activeTool == DeformationTool.Inflate || activeTool == DeformationTool.Pinch)
+                GUILayout.Label("按住左键向上拖动以膨胀／挤压。", FaceRuntimeUILayout.WrappedLabel);
+            if (instruments != null && !BoneCutInteractor.IsAnyBoneToolActive) instruments.DrawControls();
+            if (GUILayout.Button("取消当前操作", FaceRuntimeUILayout.ToolButton)) CancelCurrentToolOperation();
+            if (GUILayout.Button("重置当前组织与器械", FaceRuntimeUILayout.ToolButton)) ResetFaceAndInstruments();
+            GUILayout.Label("选中工具后，在面部用鼠标操作。R 重置；Esc 取消。", FaceRuntimeUILayout.WrappedLabel);
+        }
+
+        public void SelectBoneTool(BoneCutInteractor tool)
+        {
+            CancelCurrentToolOperation();
+            bool wasActive = tool != null && tool.ToolActive;
+            BoneCutInteractor.DeactivateAllTools();
+            if (tool != null && !wasActive) tool.SetToolActive(true);
+        }
+
+        private void CancelCurrentToolOperation()
+        {
+            if (operationActive) CancelOperation();
+            if (cutActive) CancelCut();
+            StopRebound();
+            if (instruments != null) instruments.CancelPendingInput();
+            BoneCutInteractor.CancelAllDrawing();
+        }
+
+        private void ResetFaceAndInstruments()
+        {
+            CancelCurrentToolOperation();
+            if (instruments != null) instruments.ResetInstruments();
+            if (boneSkinCoupler != null) boneSkinCoupler.ResetFaceToBoneShape();
+            else deformableMesh.ResetDeformation();
         }
 
         private void Update()
         {
+            if (SelectedLayer != null && SelectedLayer != this)
+            {
+                if (operationActive || cutActive || reboundActive) CancelCurrentToolOperation();
+                return;
+            }
             if (deformableMesh == null || deformableMesh.LogicalVertexCount == 0)
             {
                 return;
@@ -271,6 +382,13 @@ namespace DeformableImage
 
             HandleShortcuts();
             UpdateRebound();
+
+            if (activeTool >= DeformationTool.SkinHook)
+            {
+                HandleBrushRadius();
+                if (instruments != null) instruments.HandleInput(activeTool);
+                return;
+            }
 
             if (Input.GetMouseButtonDown(2))
             {
@@ -314,40 +432,15 @@ namespace DeformableImage
                 return;
             }
 
-            if (Input.GetKeyDown(KeyCode.Alpha1))
-            {
-                activeTool = DeformationTool.Drag;
-            }
-            else if (Input.GetKeyDown(KeyCode.Alpha2))
-            {
-                activeTool = DeformationTool.Inflate;
-            }
-            else if (Input.GetKeyDown(KeyCode.Alpha3))
-            {
-                activeTool = DeformationTool.Pinch;
-            }
-            else if (Input.GetKeyDown(KeyCode.Alpha4))
-            {
-                activeTool = DeformationTool.Cut;
-            }
-
             if (Input.GetKeyDown(KeyCode.R) && !operationActive)
             {
-                StopRebound();
-                if (boneSkinCoupler != null)
-                {
-                    boneSkinCoupler.ResetFaceToBoneShape();
-                }
-                else
-                {
-                    deformableMesh.ResetDeformation();
-                }
+                ResetFaceAndInstruments();
             }
         }
 
         private void HandleBrushRadius()
         {
-            if (operationActive)
+            if (operationActive || IsPointerOverToolUI())
             {
                 return;
             }
@@ -368,7 +461,7 @@ namespace DeformableImage
 
             StopRebound();
 
-            if (ignorePointerOverUi && EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
+            if (IsPointerOverToolUI())
             {
                 return;
             }
@@ -381,7 +474,7 @@ namespace DeformableImage
             if (!deformableMesh.TryClassifyGrabPoint(
                     localPoint,
                     visibleEdgeGrabDistance,
-                    out operationMayRevealBack))
+                    out _))
             {
                 return;
             }
@@ -392,6 +485,9 @@ namespace DeformableImage
             }
 
             operationStartVertices = deformableMesh.CopyCurrentVertices();
+            operationOutlineAnchors = deformableMesh.CopyOriginalOutlineAnchors();
+            operationFeatureStrengths = deformableMesh.CopyToolStretchStrengths();
+            operationMayRevealBack = deformableMesh.IsNearCutBoundary(localPoint, visibleEdgeGrabDistance);
             workingVertices = new Vector3[operationStartVertices.Length];
             operationTriangles = deformableMesh.CopyMechanicallyIntactTriangles();
             deformableMesh.TryBuildGeodesicDistances(
@@ -447,7 +543,7 @@ namespace DeformableImage
                 BuildWorkingVertices(dragDelta, scaleDelta, safeScale);
             }
 
-            deformableMesh.SetLogicalVertices(workingVertices);
+            deformableMesh.SetManualVertices(workingVertices);
         }
 
         private void BuildWorkingVertices(Vector3 dragDelta, float scaleDelta, float deformationScale)
@@ -459,6 +555,11 @@ namespace DeformableImage
             for (int i = 0; i < operationStartVertices.Length; i++)
             {
                 Vector3 original = operationStartVertices[i];
+                if (operationOutlineAnchors != null && operationOutlineAnchors[i])
+                {
+                    workingVertices[i] = original;
+                    continue;
+                }
                 Vector2 fromBrush = (Vector2)(original - operationStartLocalPoint);
                 float distance = operationGeodesicDistances != null
                     && i < operationGeodesicDistances.Length
@@ -471,6 +572,9 @@ namespace DeformableImage
                     float normalizedDistance = distance / brushRadius;
                     weight = Mathf.Pow(1f - Mathf.Clamp01(normalizedDistance), falloffPower);
                 }
+                float featureStrength = operationFeatureStrengths != null && i < operationFeatureStrengths.Length
+                    ? operationFeatureStrengths[i] : 1f;
+                weight *= featureStrength;
 
                 if (activeTool == DeformationTool.Drag)
                 {
@@ -490,6 +594,11 @@ namespace DeformableImage
                     workingVertices[i] = original
                         + radialDirection * (scaleDelta * weight * deformationScale);
                 }
+                // Only a per-stroke pull limit: no cumulative displacement budget,
+                // fixed eyelid/lip contour, or stronger corner anchors.
+                if (featureStrength < 0.999f)
+                    workingVertices[i] = original + Vector3.ClampMagnitude(workingVertices[i] - original,
+                        brushRadius * 1.2f * featureStrength);
             }
         }
 
@@ -555,6 +664,8 @@ namespace DeformableImage
             operationStartVertices = null;
             workingVertices = null;
             operationTriangles = null;
+            operationOutlineAnchors = null;
+            operationFeatureStrengths = null;
             operationGeodesicDistances = null;
             operationMayRevealBack = false;
             operationPinned = false;
@@ -564,7 +675,7 @@ namespace DeformableImage
         {
             if (operationStartVertices != null)
             {
-                deformableMesh.SetLogicalVertices(operationStartVertices);
+                deformableMesh.SetManualVertices(operationStartVertices);
             }
 
             ClearOperationState();
@@ -613,12 +724,12 @@ namespace DeformableImage
 
             if (normalizedTime >= 1f)
             {
-                deformableMesh.SetLogicalVertices(reboundTargetVertices);
+                deformableMesh.SetManualVertices(reboundTargetVertices);
                 StopRebound();
             }
             else
             {
-                deformableMesh.SetLogicalVertices(reboundWorkingVertices);
+                deformableMesh.SetManualVertices(reboundWorkingVertices);
             }
         }
 
@@ -680,7 +791,7 @@ namespace DeformableImage
                 return;
             }
 
-            if (ignorePointerOverUi && EventSystem.current != null && EventSystem.current.IsPointerOverGameObject())
+            if (IsPointerOverToolUI())
             {
                 return;
             }
@@ -1397,6 +1508,16 @@ namespace DeformableImage
         private bool TryGetLocalPointerPosition(out Vector3 localPoint)
         {
             return TryGetLocalPointerPosition(deformableMesh, out localPoint);
+        }
+
+        public bool IsPointerOverToolUI()
+        {
+            if (!ignorePointerOverUi) return false;
+            if (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject()) return true;
+            Vector2 p = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
+            return FaceRuntimeUILayout.Enabled
+                ? p.y >= 12f && (p.x <= FaceRuntimeUILayout.Width + 12f || p.x >= Screen.width - FaceRuntimeUILayout.Width - 12f)
+                : FaceRuntimeUILayout.Left(1) && FaceRuntimeUILayout.Panel(false, Screen.height - 66f).Contains(p);
         }
 
         private bool TryGetLocalPointerPosition(

@@ -103,6 +103,15 @@ namespace DeformableImage
         private Vector2[] visibleGeometryVertices = Array.Empty<Vector2>();
         private ushort[] visibleGeometryTriangles = Array.Empty<ushort>();
         private byte[] alphaMask = Array.Empty<byte>();
+        private FacialFeaturePrecut2D toolFeatureCurves;
+        private Vector3[] toolStrengthRestSource;
+        private float[] toolFeatureStrengths = Array.Empty<float>();
+        private int toolCurveHash;
+        private bool toolStrengthsPrepared;
+        private bool[] originalOutlineAnchors;
+        private Vector3[] outlineRestSource;
+        private int[] outlineTriangleSource;
+        private byte[] outlineAlphaSource;
         private int alphaMaskWidth;
         private int alphaMaskHeight;
         private byte[] cutMaskAlpha = Array.Empty<byte>();
@@ -589,6 +598,138 @@ namespace DeformableImage
         public Vector3 GetLogicalVertex(int index)
         {
             return logicalVertices[index];
+        }
+
+        /// <summary>
+        /// Anchors support triangles of the original alpha silhouette, independent of cuts.
+        /// Returned data is a copy; topology changes automatically invalidate the cache.
+        /// Detached pieces retain their existing free cloth motion.
+        /// </summary>
+        public bool[] CopyOriginalOutlineAnchors()
+        {
+            if (originalOutlineAnchors != null && ReferenceEquals(outlineRestSource, restVertices)
+                && ReferenceEquals(outlineTriangleSource, logicalTriangles)
+                && ReferenceEquals(outlineAlphaSource, alphaMask))
+                return (bool[])originalOutlineAnchors.Clone();
+
+            originalOutlineAnchors = new bool[restVertices.Length];
+            outlineRestSource = restVertices;
+            outlineTriangleSource = logicalTriangles;
+            outlineAlphaSource = alphaMask;
+            if (detachedFromMesh != null) return (bool[])originalOutlineAnchors.Clone();
+
+            int[] integral = alphaMask.Length > 0
+                ? OriginalOutlineMath.BuildExteriorIntegral(alphaMask, alphaMaskWidth, alphaMaskHeight) : null;
+            for (int t = 0; t + 2 < logicalTriangles.Length; t += 3)
+            {
+                int a = logicalTriangles[t], b = logicalTriangles[t + 1], c = logicalTriangles[t + 2];
+                bool touches = false;
+                if (integral != null)
+                {
+                    Vector2 ua = RestPointToNormalized(restVertices[a]);
+                    Vector2 ub = RestPointToNormalized(restVertices[b]);
+                    Vector2 uc = RestPointToNormalized(restVertices[c]);
+                    touches = OriginalOutlineMath.TouchesExterior(integral, alphaMaskWidth, alphaMaskHeight,
+                        Mathf.Min(ua.x, Mathf.Min(ub.x, uc.x)), Mathf.Min(ua.y, Mathf.Min(ub.y, uc.y)),
+                        Mathf.Max(ua.x, Mathf.Max(ub.x, uc.x)), Mathf.Max(ua.y, Mathf.Max(ub.y, uc.y)));
+                }
+                else
+                {
+                    // Unreadable sprites fall back to their original geometry outline.
+                    Vector2 pa = restVertices[a], pb = restVertices[b], pc = restVertices[c];
+                    for (int s = 0; s + 1 < visibleBoundarySegments.Count && !touches; s += 2)
+                    {
+                        Vector2 p = visibleBoundarySegments[s], q = visibleBoundarySegments[s + 1];
+                        touches = (TryGetBarycentricCoordinates(p, pa, pb, pc, out Vector3 w)
+                                && w.x >= 0f && w.y >= 0f && w.z >= 0f)
+                            || SegmentsIntersect(p, q, pa, pb) || SegmentsIntersect(p, q, pb, pc)
+                            || SegmentsIntersect(p, q, pc, pa);
+                    }
+                }
+                if (touches) originalOutlineAnchors[a] = originalOutlineAnchors[b] = originalOutlineAnchors[c] = true;
+            }
+            return (bool[])originalOutlineAnchors.Clone();
+        }
+
+        /// <summary>Only an actual incision grants unrestricted attached-surface dragging.</summary>
+        public bool IsNearCutBoundary(Vector3 currentLocalPoint, float distance)
+        {
+            if (!hasAppliedCuts || !TryMapCurrentPointToRest(currentLocalPoint, out Vector2 restPoint)) return false;
+            foreach (CutBarrier barrier in openCutBarriers)
+            {
+                float reach = distance + barrier.Radius;
+                for (int i = 0; i + 1 < barrier.Points.Length; i++)
+                    if (DistanceSquaredToSegment(restPoint, barrier.Points[i], barrier.Points[i + 1]) <= reach * reach)
+                        return true;
+            }
+            if (cutMaskAlpha.Length != alphaMask.Length || alphaMask.Length == 0) return false;
+            Vector2 uv = RestPointToNormalized(restPoint);
+            int cx = Mathf.RoundToInt(uv.x * (alphaMaskWidth - 1));
+            int cy = Mathf.RoundToInt(uv.y * (alphaMaskHeight - 1));
+            int rx = Mathf.Max(1, Mathf.CeilToInt(distance / Mathf.Max(0.0001f, gridSize.x) * alphaMaskWidth));
+            int ry = Mathf.Max(1, Mathf.CeilToInt(distance / Mathf.Max(0.0001f, gridSize.y) * alphaMaskHeight));
+            for (int y = Mathf.Max(0, cy - ry); y <= Mathf.Min(alphaMaskHeight - 1, cy + ry); y++)
+                for (int x = Mathf.Max(0, cx - rx); x <= Mathf.Min(alphaMaskWidth - 1, cx + rx); x++)
+                {
+                    float dx = (x - cx) / (float)rx, dy = (y - cy) / (float)ry;
+                    int index = y * alphaMaskWidth + x;
+                    if (dx * dx + dy * dy <= 1f && alphaMask[index] >= 16 && cutMaskAlpha[index] < 16) return true;
+                }
+            return false;
+        }
+
+        public void ConfigureToolFeatureResponse(FacialFeaturePrecut2D curves)
+        {
+            toolFeatureCurves = curves;
+            toolStrengthsPrepared = false;
+        }
+
+        public float[] CopyToolStretchStrengths()
+        {
+            if (toolFeatureCurves == null && !toolStrengthsPrepared)
+                foreach (var curves in FindObjectsOfType<FacialFeaturePrecut2D>())
+                    if (curves.SkinLayer == this || curves.FatLayer == this || curves.MuscleLayer == this)
+                    { toolFeatureCurves = curves; break; }
+            int hash = toolFeatureCurves != null ? toolFeatureCurves.CalculateCurveHash() : 0;
+            if (toolStrengthsPrepared && ReferenceEquals(toolStrengthRestSource, restVertices) && toolCurveHash == hash)
+                return (float[])toolFeatureStrengths.Clone();
+            toolStrengthRestSource = restVertices; toolCurveHash = hash; toolStrengthsPrepared = true;
+            toolFeatureStrengths = new float[restVertices.Length];
+            for (int i = 0; i < toolFeatureStrengths.Length; i++) toolFeatureStrengths[i] = 1f;
+            if (toolFeatureCurves == null || detachedFromMesh != null) return (float[])toolFeatureStrengths.Clone();
+            for (int curveIndex = 0; curveIndex < 3; curveIndex++)
+            {
+                var points = toolFeatureCurves.GetSampledEditableCurve(curveIndex);
+                if (points.Count < 2) continue;
+                for (int i = 0; i < restVertices.Length; i++)
+                {
+                    Vector2 uv = RestPointToNormalized(restVertices[i]);
+                    float distance = float.PositiveInfinity;
+                    for (int s = 0; s + 1 < points.Count; s++)
+                        distance = Mathf.Min(distance, FeatureBoundaryMath.DistanceToSegment(uv.x, uv.y,
+                            points[s].x, points[s].y, points[s + 1].x, points[s + 1].y));
+                    toolFeatureStrengths[i] = Mathf.Min(toolFeatureStrengths[i], FeatureBoundaryMath.StretchStrength(distance));
+                }
+            }
+            return (float[])toolFeatureStrengths.Clone();
+        }
+
+        public float ToolStretchStrengthAt(Vector3 currentLocalPoint)
+        {
+            var strengths = CopyToolStretchStrengths();
+            if (!TryGetNormalizedUvAtCurrentPoint(currentLocalPoint, out Vector2 uv)) return 1f;
+            int nearest = -1; float best = float.PositiveInfinity;
+            for (int i = 0; i < restVertices.Length; i++)
+            {
+                float distance = (RestPointToNormalized(restVertices[i]) - uv).sqrMagnitude;
+                if (distance < best) { best = distance; nearest = i; }
+            }
+            return nearest >= 0 ? strengths[nearest] : 1f;
+        }
+
+        public void SetManualVertices(Vector3[] positions)
+        {
+            SoftTissueLayerCoupler2D.ApplyManualVertices(this, positions);
         }
 
         public void SetLogicalVertices(Vector3[] positions)

@@ -10,6 +10,8 @@ namespace DeformableImage
         public static int RightTab { get; private set; }
         public static bool Left(int tab) { return !Enabled || LeftTab == tab; }
         public static bool Right(int tab) { return !Enabled || RightTab == tab; }
+        public static GUIStyle WrappedLabel { get { return new GUIStyle(GUI.skin.label) { wordWrap = true, fixedHeight = 0f, fontSize = 13 }; } }
+        public static GUIStyle ToolButton { get { return new GUIStyle(GUI.skin.button) { wordWrap = true, fixedHeight = 30f, fontSize = 13 }; } }
         public static float Width { get { return Mathf.Max(140f, Mathf.Min(330f, (Screen.width - 36f) * 0.27f)); } }
         public static Rect Panel(bool right, float preferredHeight)
         {

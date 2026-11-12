@@ -104,6 +104,7 @@ namespace DeformableImage
             }
 
             EnsureEditableCurves();
+            RegisterFeatureProtection();
         }
 
         private void Start()
@@ -141,6 +142,14 @@ namespace DeformableImage
             fatLayer = fat;
             muscleLayer = muscle;
             EnsureEditableCurves();
+            RegisterFeatureProtection();
+        }
+
+        private void RegisterFeatureProtection()
+        {
+            if (skinLayer != null) skinLayer.ConfigureToolFeatureResponse(this);
+            if (fatLayer != null) fatLayer.ConfigureToolFeatureResponse(this);
+            if (muscleLayer != null) muscleLayer.ConfigureToolFeatureResponse(this);
         }
 
         public FacialCutCurve2D GetEditableCurve(int index)

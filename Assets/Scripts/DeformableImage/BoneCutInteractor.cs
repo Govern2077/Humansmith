@@ -10,8 +10,6 @@ namespace DeformableImage
     {
         [Header("Input")]
         [SerializeField] private Camera targetCamera;
-        [SerializeField] private bool enableKeyboardShortcut = true;
-        [SerializeField] private KeyCode shortcut = KeyCode.Alpha5;
         [SerializeField] private bool ignorePointerOverUi = true;
 
         [Header("Closed Bone Removal")]
@@ -21,7 +19,7 @@ namespace DeformableImage
         [SerializeField, Min(0.002f)] private float previewWidth = 0.025f;
         [SerializeField] private Color previewColor = new Color(1f, 0.75f, 0.1f, 0.98f);
         [SerializeField, TextArea(2, 4)] private string lastStatus =
-            "Press 5, then draw a closed lasso over the bone.";
+            "点击面板中的骨骼工具，再在骨骼上画闭合轮廓。";
 
         private static readonly List<BoneCutInteractor> Instances = new List<BoneCutInteractor>();
         private readonly List<Vector2> pathUvs = new List<Vector2>();
@@ -30,6 +28,47 @@ namespace DeformableImage
         private bool drawing;
         private LineRenderer preview;
         private Material previewMaterial;
+        public bool ToolActive { get { return toolActive; } }
+        private string DisplayName
+        {
+            get
+            {
+                string label = gameObject.name.ToLowerInvariant();
+                return label.Contains("jaw") ? "下颌骨" : label.Contains("skull") ? "颅骨" : gameObject.name;
+            }
+        }
+
+        public void SetToolActive(bool active)
+        {
+            toolActive = active;
+            if (!active) CancelDrawing();
+            lastStatus = active ? "骨骼切割已开启：左键画闭合轮廓。" : "骨骼切割已关闭。";
+        }
+
+        public static void DeactivateAllTools()
+        {
+            foreach (BoneCutInteractor tool in Instances) if (tool != null) tool.SetToolActive(false);
+        }
+
+        public static void CancelAllDrawing()
+        {
+            foreach (BoneCutInteractor tool in Instances) if (tool != null) tool.CancelDrawing();
+        }
+
+        public static void DrawToolButtons(System.Action<BoneCutInteractor> select)
+        {
+            bool heading = false;
+            foreach (BoneCutInteractor tool in Instances)
+            {
+                if (tool == null || !tool.isActiveAndEnabled) continue;
+                if (!heading) { GUILayout.Label("骨骼工具 · 选择操作对象", FaceRuntimeUILayout.WrappedLabel); heading = true; }
+                Color before = GUI.backgroundColor;
+                if (tool.ToolActive) GUI.backgroundColor = new Color(0.55f, 0.85f, 1f);
+                if (GUILayout.Button((tool.ToolActive ? "● " : "") + "骨骼切割 · " + tool.DisplayName, FaceRuntimeUILayout.ToolButton)) select(tool);
+                GUI.backgroundColor = before;
+                if (tool.ToolActive) GUILayout.Label(tool.lastStatus, FaceRuntimeUILayout.WrappedLabel);
+            }
+        }
 
         public static bool IsAnyBoneToolActive
         {
@@ -87,32 +126,26 @@ namespace DeformableImage
 
         private void OnGUI()
         {
-            if (!Application.isPlaying || !toolActive || !FaceRuntimeUILayout.Left(1))
+            if (!Application.isPlaying || !FaceRuntimeUILayout.Left(1) || DeformableImageInteractor.HasToolPanel
+                || Instances.Find(tool => tool != null && tool.isActiveAndEnabled) != this)
             {
                 return;
             }
 
-            GUI.Box(
-                FaceRuntimeUILayout.Enabled ? new Rect(12f, 174f, FaceRuntimeUILayout.Width, 100f) : new Rect(12f, 102f, 620f, 64f),
-                "Active Tool: BONE CLOSED CUT (5)"
-                + "\nLeft drag a closed lasso; yellow is preview."
-                + "\n" + lastStatus);
+            GUILayout.BeginArea(FaceRuntimeUILayout.Panel(false, 310f), GUI.skin.box);
+            GUILayout.Label("操作工具 · 点击选择", FaceRuntimeUILayout.WrappedLabel);
+            DrawToolButtons(tool =>
+            {
+                bool wasActive = tool.ToolActive;
+                DeactivateAllTools();
+                if (!wasActive) tool.SetToolActive(true);
+            });
+            if (GUILayout.Button("取消当前切割")) CancelAllDrawing();
+            GUILayout.EndArea();
         }
 
         private void Update()
         {
-            if (enableKeyboardShortcut && Input.GetKeyDown(shortcut))
-            {
-                toolActive = !toolActive;
-                lastStatus = toolActive
-                    ? "Bone cutting enabled. Draw a closed lasso."
-                    : "Bone cutting disabled.";
-                if (!toolActive)
-                {
-                    CancelDrawing();
-                }
-            }
-
             if (!toolActive)
             {
                 return;
@@ -143,7 +176,12 @@ namespace DeformableImage
 
         private void BeginDrawing()
         {
+            Vector2 pointer = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
+            bool overPanel = FaceRuntimeUILayout.Enabled
+                ? pointer.y >= 12f && (pointer.x <= FaceRuntimeUILayout.Width + 12f || pointer.x >= Screen.width - FaceRuntimeUILayout.Width - 12f)
+                : FaceRuntimeUILayout.Left(1) && FaceRuntimeUILayout.Panel(false, Screen.height - 66f).Contains(pointer);
             if (AnatomyBoneFragmentMover.IsPointerCaptured
+                || ignorePointerOverUi && overPanel
                 || ignorePointerOverUi && EventSystem.current != null
                     && EventSystem.current.IsPointerOverGameObject())
             {

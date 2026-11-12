@@ -6010,15 +6010,13 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   targetCamera: {fileID: 0}
-  enableKeyboardShortcut: 1
-  shortcut: 53
   ignorePointerOverUi: 1
   toolActive: 0
   pointSpacing: 0.03
   closedLoopDistance: 0.2
   previewWidth: 0.025
   previewColor: {r: 1, g: 0.75, b: 0.1, a: 0.98}
-  lastStatus: Press 5, then draw a closed lasso over the bone.
+  lastStatus: 点击面板中的骨骼工具，再在骨骼上画闭合轮廓。
 --- !u!114 &983762587
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -54940,15 +54938,13 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   targetCamera: {fileID: 0}
-  enableKeyboardShortcut: 1
-  shortcut: 53
   ignorePointerOverUi: 1
   toolActive: 0
   pointSpacing: 0.03
   closedLoopDistance: 0.2
   previewWidth: 0.025
   previewColor: {r: 1, g: 0.75, b: 0.1, a: 0.98}
-  lastStatus: Press 5, then draw a closed lasso over the bone.
+  lastStatus: 点击面板中的骨骼工具，再在骨骼上画闭合轮廓。
 --- !u!114 &1801836301
 MonoBehaviour:
   m_ObjectHideFlags: 0

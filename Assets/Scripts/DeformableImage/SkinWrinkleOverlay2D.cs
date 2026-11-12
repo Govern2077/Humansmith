@@ -207,7 +207,7 @@ namespace DeformableImage
             previewTexture = GUILayout.Toggle(previewTexture, "预览贴图位置（忽略压缩，仅作显示测试）");
             useSourceColor = GUILayout.Toggle(useSourceColor, "使用彩色贴图原色（黑底自动忽略）");
             GUILayout.Label("区域最大激活：" + maximumActivation.ToString("0.00"));
-            GUILayout.Label("先关闭贴图预览；按 3 切换挤压，在面部按住左键向上拖动。仅受压位置的纹路显现，拉伸或还原后清除。");
+            GUILayout.Label("先关闭贴图预览；在左侧“操作工具”面板点击“挤压”，再在面部按住左键向上拖动。仅受压位置的纹路显现，拉伸或还原后清除。");
             GUILayout.Label("如果术前标记预览暂停了工具，请先按 F10 还原。中性脸默认不添加动态皱纹。");
             if (GUILayout.Button("以当前静止形状校准（清除激活）")) CalibrateCurrentShape();
             GUILayout.Label(status);
