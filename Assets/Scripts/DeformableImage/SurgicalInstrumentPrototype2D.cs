@@ -39,6 +39,7 @@ namespace DeformableImage
         private Vector3[] current = Array.Empty<Vector3>(), result = Array.Empty<Vector3>(), applied = Array.Empty<Vector3>();
         private Vector3[] unconstrained = Array.Empty<Vector3>();
         private float[] separation = Array.Empty<float>();
+        private bool hasSeparation, hasAppliedDisplacement;
         private bool[] anchors = Array.Empty<bool>();
         private Material lineMaterial;
         private LineRenderer preview;
@@ -78,6 +79,7 @@ namespace DeformableImage
         {
             ClearVisuals(); pulls.Clear(); stitches.Clear(); held = firstStitch = null; dissecting = false;
             current = result = applied = Array.Empty<Vector3>(); separation = Array.Empty<float>();
+            hasSeparation = hasAppliedDisplacement = false;
             status = "网格／静止形状已更新，器械已清除，可重新放置。";
         }
 
@@ -199,7 +201,11 @@ namespace DeformableImage
             if (brush == null) return false;
             if (coupler != null) coupler.ReleaseInfluence(uv, owner.BrushRadius * uvRadiusScale, amount);
             for (int i = 0; i < separation.Length; i++)
-                if (!anchors[i]) separation[i] = Mathf.Min(0.16f, separation[i] + Mathf.Max(0f, amount) * brush.Weights[i] * 0.12f);
+            {
+                if (anchors[i]) continue;
+                separation[i] = Mathf.Min(0.16f, separation[i] + Mathf.Max(0f, amount) * brush.Weights[i] * 0.12f);
+                hasSeparation |= separation[i] > 0f;
+            }
             lastTip = current[brush.Vertex];
             return true;
         }
@@ -228,14 +234,16 @@ namespace DeformableImage
         // pull/closure a second time, so held tools do not creep and removal is reversible.
         public void SolveConstraints()
         {
+            if (pulls.Count == 0 && stitches.Count == 0 && !hasSeparation && !hasAppliedDisplacement) return;
             EnsureBuffers();
             if (current.Length == 0 || !skin.CopyCurrentVerticesNonAlloc(current)) return;
             bool changed = false;
+            float liftSign = hasSeparation ? LiftSign : 0f;
             for (int i = 0; i < current.Length; i++)
             {
                 unconstrained[i] = current[i] - applied[i];
                 result[i] = unconstrained[i];
-                if (!anchors[i]) result[i].z += separation[i] * LiftSign;
+                if (!anchors[i]) result[i].z += separation[i] * liftSign;
                 if (applied[i].sqrMagnitude > 1e-12f || separation[i] > 0f) changed = true;
             }
             for (int p = pulls.Count - 1; p >= 0; p--)
@@ -266,7 +274,12 @@ namespace DeformableImage
                 if (anchors[i]) result[i] = unconstrained[i];
             }
             if (changed) skin.SetManualVertices(result);
-            for (int i = 0; i < result.Length; i++) applied[i] = result[i] - unconstrained[i];
+            hasAppliedDisplacement = false;
+            for (int i = 0; i < result.Length; i++)
+            {
+                applied[i] = result[i] - unconstrained[i];
+                hasAppliedDisplacement |= applied[i].sqrMagnitude > 1e-12f;
+            }
             RefreshVisuals();
         }
 

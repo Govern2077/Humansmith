@@ -66,11 +66,10 @@ namespace DeformableImage.Editor
                 Require(Mathf.Abs(strengths[corner] - strengths[mouth]) < 0.03f, "No special mouth-corner anchor");
                 Require(strengths[cheek] > 0.999f, "Unrelated skin keeps original strength");
                 var single = BuildPull(skinTool, skin, baseline, strengths, eye, Vector3.right * 0.2f);
-                Require(Mathf.Abs(single[eye].x - baseline[eye].x - 0.2f * strengths[eye]) < 0.00001f, "Drag response uses local strength");
+                Require(Mathf.Abs(single[eye].x - baseline[eye].x - 0.2f) < 0.00001f, "Manual dragging no longer weakens the whole eye curve");
                 var large = BuildPull(skinTool, skin, baseline, strengths, eye, Vector3.right * 100f);
-                float singleMaximum = 1.2f * 1.2f * strengths[eye];
-                Require(Vector3.Distance(large[eye], baseline[eye]) <= singleMaximum + 0.00001f, "Large gesture has reduced per-stroke maximum");
-                Require(Vector3.Distance(large[eye], baseline[eye]) > 0.5f, "Former absolute contour lock is removed");
+                Require(Mathf.Abs(Vector3.Distance(large[eye], baseline[eye]) - 0.36f) < 0.00001f,
+                    "Eye centre reaches the halved incision travel limit without additional contour resistance");
                 skin.SetLogicalVertices(single);
                 skin.SetLogicalVertices((Vector3[])baseline.Clone());
                 Require((skin.CopyCurrentVertices()[eye] - baseline[eye]).sqrMagnitude < 1e-10f, "Cancellation exactly restores baseline");
@@ -121,6 +120,7 @@ namespace DeformableImage.Editor
             Set(tool, "operationStartLocalPoint", baseline[centre]);
             Set(tool, "operationOutlineAnchors", skin.CopyOriginalOutlineAnchors());
             Set(tool, "operationFeatureStrengths", strengths);
+            Set(tool, "operationDragWeights", null);
             Set(tool, "operationMayRevealBack", true);
             Set(tool, "brushRadius", 1.2f);
             Set(tool, "workingVertices", new Vector3[baseline.Length]);

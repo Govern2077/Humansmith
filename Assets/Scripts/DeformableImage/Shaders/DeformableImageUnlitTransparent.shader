@@ -8,6 +8,7 @@ Shader "Deformable Image/Unlit Transparent"
         _CutVisualColor ("Cut Visual Color", Color) = (1,0.35,0.35,0.72)
         _Color ("Tint", Color) = (1,1,1,1)
         _DepthAlphaCutoff ("Depth Alpha Cutoff", Range(0,0.25)) = 0.002
+        [HideInInspector] _ShowDragWeights ("Show Drag Weights", Float) = 0
         _AmbientStrength ("Ambient Strength", Range(0,2)) = 0.65
         _DiffuseStrength ("Diffuse Strength", Range(0,2)) = 0.55
         _SpecularStrength ("Specular Strength", Range(0,1)) = 0.08
@@ -31,11 +32,11 @@ Shader "Deformable Image/Unlit Transparent"
         }
 
         Cull Back
-        // The front and back are separate, coincident submeshes. Without depth writes,
-        // a visible back-facing triangle drawn later can blend over a nearer front-facing
-        // triangle when the relief mesh is viewed at a grazing angle.
+        // Front submesh is submitted before the back submesh. Reject equal depth so
+        // a coplanar rear fold cannot overwrite front skin just because it draws later.
+        // A genuinely nearer flipped back still passes; transparent cuts still clip.
         ZWrite On
-        ZTest LEqual
+        ZTest Less
         Blend SrcAlpha OneMinusSrcAlpha
 
         Pass
@@ -57,6 +58,7 @@ Shader "Deformable Image/Unlit Transparent"
                 float3 normal : NORMAL;
                 float2 uv : TEXCOORD0;
                 float2 cutUv : TEXCOORD1;
+                float4 color : COLOR;
             };
 
             struct VertexToFragment
@@ -67,6 +69,7 @@ Shader "Deformable Image/Unlit Transparent"
                 float3 worldPosition : TEXCOORD2;
                 float3 worldNormal : TEXCOORD3;
                 SHADOW_COORDS(4)
+                float dragWeight : TEXCOORD5;
             };
 
             sampler2D _MainTex;
@@ -76,6 +79,7 @@ Shader "Deformable Image/Unlit Transparent"
             fixed4 _Color;
             fixed4 _CutVisualColor;
             float _DepthAlphaCutoff;
+            float _ShowDragWeights;
             float _AmbientStrength;
             float _DiffuseStrength;
             float _SpecularStrength;
@@ -94,6 +98,7 @@ Shader "Deformable Image/Unlit Transparent"
                 output.position = UnityObjectToClipPos(input.vertex);
                 output.uv = TRANSFORM_TEX(input.uv, _MainTex);
                 output.cutUv = input.cutUv;
+                output.dragWeight = input.color.r;
                 output.worldPosition = mul(unity_ObjectToWorld, input.vertex).xyz;
                 output.worldNormal = UnityObjectToWorldNormal(input.normal);
                 TRANSFER_SHADOW(output)
@@ -134,6 +139,8 @@ Shader "Deformable Image/Unlit Transparent"
                 // depth. Visible skin does write depth so its front surface occludes the
                 // rear pattern correctly at oblique camera angles.
                 clip(color.a - _DepthAlphaCutoff);
+                if (_ShowDragWeights > 0.5)
+                    return fixed4(lerp(float3(0.02, 0.20, 1.0), float3(1.0, 0.05, 0.02), saturate(input.dragWeight)), color.a);
 
                 float3 normalDirection = normalize(input.worldNormal);
                 float3 lightDirection = normalize(UnityWorldSpaceLightDir(input.worldPosition));

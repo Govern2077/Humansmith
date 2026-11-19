@@ -5944,10 +5944,10 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   effectEnabled: 1
   mode: 0
-  blend: 1
+  blend: 0.682
   orderedColorMode: 1
-  ditherSourcePixelSize: 2
-  ditherPatternScale: 2
+  ditherSourcePixelSize: 1
+  ditherPatternScale: 1
   ditherLevels: 2
   ditherThresholdBias: 0
   ditherChannelOffset: 0
@@ -6016,7 +6016,7 @@ MonoBehaviour:
   closedLoopDistance: 0.2
   previewWidth: 0.025
   previewColor: {r: 1, g: 0.75, b: 0.1, a: 0.98}
-  lastStatus: 点击面板中的骨骼工具，再在骨骼上画闭合轮廓。
+  lastStatus: "\u70B9\u51FB\u9762\u677F\u4E2D\u7684\u9AA8\u9ABC\u5DE5\u5177\uFF0C\u518D\u5728\u9AA8\u9ABC\u4E0A\u753B\u95ED\u5408\u8F6E\u5ED3\u3002"
 --- !u!114 &983762587
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -54944,7 +54944,7 @@ MonoBehaviour:
   closedLoopDistance: 0.2
   previewWidth: 0.025
   previewColor: {r: 1, g: 0.75, b: 0.1, a: 0.98}
-  lastStatus: 点击面板中的骨骼工具，再在骨骼上画闭合轮廓。
+  lastStatus: "\u70B9\u51FB\u9762\u677F\u4E2D\u7684\u9AA8\u9ABC\u5DE5\u5177\uFF0C\u518D\u5728\u9AA8\u9ABC\u4E0A\u753B\u95ED\u5408\u8F6E\u5ED3\u3002"
 --- !u!114 &1801836301
 MonoBehaviour:
   m_ObjectHideFlags: 0

@@ -16,6 +16,9 @@ namespace DeformableImage
         private const int SamplesPerVertex = 4;
         private static readonly List<SoftTissueLayerCoupler2D> Instances = new List<SoftTissueLayerCoupler2D>();
         private static bool applyingManualTransfer;
+        private static Vector3[] originManualDelta = Array.Empty<Vector3>();
+        private Vector3[] mappedManualDelta = Array.Empty<Vector3>();
+        private Vector3[] manualTargetPositions = Array.Empty<Vector3>();
         private int[] reverseSampleIndices = Array.Empty<int>();
         private float[] reverseSampleWeights = Array.Empty<float>();
 
@@ -230,10 +233,12 @@ namespace DeformableImage
         private void CalculateSourceOffsets()
         {
             sourceLayer.CopyCurrentVerticesNonAlloc(sourceCurrentVertices);
+            Matrix4x4 sourceToWorld = sourceLayer.transform.localToWorldMatrix;
+            Matrix4x4 worldToDriven = drivenLayer.transform.worldToLocalMatrix;
             for (int i = 0; i < sourceCurrentVertices.Length; i++)
-                currentSourceWorld[i] = sourceLayer.transform.TransformPoint(sourceCurrentVertices[i]);
+                currentSourceWorld[i] = sourceToWorld.MultiplyPoint3x4(sourceCurrentVertices[i]);
             for (int i = 0; i < drivenBindVertices.Length; i++)
-                rawOffsets[i] = Vector3.ClampMagnitude(drivenLayer.transform.InverseTransformVector(
+                rawOffsets[i] = Vector3.ClampMagnitude(worldToDriven.MultiplyVector(
                     SampleWorldDelta(i, currentSourceWorld)) * response, maximumDisplacement);
             SmoothOffsets();
             for (int i = 0; i < smoothOffsets.Length; i++) smoothOffsets[i] *= 1f - releasedInfluence[i];
@@ -247,7 +252,7 @@ namespace DeformableImage
             return bound;
         }
 
-        private sealed class ManualTransfer
+        private struct ManualTransfer
         {
             public DeformableImageMesh Mesh;
             public Vector3[] Positions, WorldDelta;
@@ -261,9 +266,17 @@ namespace DeformableImage
         {
             if (origin == null || positions == null || positions.Length != origin.LogicalVertexCount) return;
             if (applyingManualTransfer) { origin.SetLogicalVertices(positions); return; }
-            Vector3[] before = origin.CopyCurrentVertices();
-            var first = new ManualTransfer { Mesh = origin, Positions = positions, WorldDelta = new Vector3[before.Length] };
-            for (int i = 0; i < before.Length; i++) first.WorldDelta[i] = origin.transform.TransformVector(positions[i] - before[i]);
+            if (originManualDelta.Length != positions.Length) originManualDelta = new Vector3[positions.Length];
+            var first = new ManualTransfer { Mesh = origin, Positions = positions, WorldDelta = originManualDelta };
+            Matrix4x4 originToWorld = origin.transform.localToWorldMatrix;
+            bool moved = false;
+            for (int i = 0; i < positions.Length; i++)
+            {
+                Vector3 delta = positions[i] - origin.GetLogicalVertex(i);
+                first.WorldDelta[i] = originToWorld.MultiplyVector(delta);
+                moved |= delta.sqrMagnitude > 0f;
+            }
+            if (!moved) return;
             var transfers = new List<ManualTransfer> { first };
             var visited = new HashSet<DeformableImageMesh> { origin };
             var links = new List<SoftTissueLayerCoupler2D>();
@@ -279,12 +292,16 @@ namespace DeformableImage
                     var target = reverse ? link.sourceLayer : link.drivenLayer;
                     if (visited.Contains(target) || target.DetachedFromMesh != null || !link.EnsureBinding()) continue;
                     var worldDelta = link.MapManualDelta(from.WorldDelta, reverse);
-                    var next = new ManualTransfer { Mesh = target, Positions = target.CopyCurrentVertices(), WorldDelta = worldDelta };
-                    bool[] anchors = target.CopyOriginalOutlineAnchors();
+                    if (link.manualTargetPositions.Length != target.LogicalVertexCount)
+                        link.manualTargetPositions = new Vector3[target.LogicalVertexCount];
+                    target.CopyCurrentVerticesNonAlloc(link.manualTargetPositions);
+                    var next = new ManualTransfer { Mesh = target, Positions = link.manualTargetPositions, WorldDelta = worldDelta };
+                    bool[] anchors = target.GetOriginalOutlineAnchors();
+                    Matrix4x4 worldToTarget = target.transform.worldToLocalMatrix;
                     for (int i = 0; i < next.Positions.Length; i++)
                     {
                         if (anchors[i]) { next.WorldDelta[i] = Vector3.zero; continue; }
-                        next.Positions[i] += target.transform.InverseTransformVector(next.WorldDelta[i]);
+                        next.Positions[i] += worldToTarget.MultiplyVector(next.WorldDelta[i]);
                     }
                     visited.Add(target); transfers.Add(next);
                 }
@@ -313,24 +330,33 @@ namespace DeformableImage
                 reverseSampleIndices = new int[sourceUvs.Length * SamplesPerVertex];
                 reverseSampleWeights = new float[reverseSampleIndices.Length];
                 bool identical = HaveIdenticalUvLayout(sourceUvs, releaseUvs);
+                var exactVertices = identical ? null : new Dictionary<Vector2, int>(releaseUvs.Length);
+                if (exactVertices != null)
+                    for (int i = 0; i < releaseUvs.Length; i++) exactVertices.TryAdd(releaseUvs[i], i);
                 for (int i = 0; i < sourceUvs.Length; i++)
+                {
                     if (identical) SetDirectBinding(i, i, reverseSampleIndices, reverseSampleWeights);
+                    else if (exactVertices.TryGetValue(sourceUvs[i], out int vertex))
+                        SetDirectBinding(i, vertex, reverseSampleIndices, reverseSampleWeights);
                     else BuildNearestUvBinding(i, sourceUvs[i], releaseUvs, reverseSampleIndices, reverseSampleWeights);
+                }
             }
             int[] indices = reverse ? reverseSampleIndices : sampleIndices;
             float[] weights = reverse ? reverseSampleWeights : sampleWeights;
             int count = reverse ? sourceLayer.LogicalVertexCount : drivenLayer.LogicalVertexCount;
-            var mapped = new Vector3[count];
+            if (mappedManualDelta.Length != count) mappedManualDelta = new Vector3[count];
             for (int i = 0; i < count; i++)
             {
+                Vector3 offsetSum = Vector3.zero;
                 for (int s = 0; s < SamplesPerVertex; s++)
                 {
                     int offset = i * SamplesPerVertex + s, index = indices[offset];
                     float attachment = 1f - releasedInfluence[reverse ? index : i];
-                    mapped[i] += delta[index] * (weights[offset] * attachment * response);
+                    offsetSum += delta[index] * (weights[offset] * attachment * response);
                 }
+                mappedManualDelta[i] = offsetSum;
             }
-            return mapped;
+            return mappedManualDelta;
         }
 
         public void ResetDrivenLayerToSourceShape()

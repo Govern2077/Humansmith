@@ -9,9 +9,11 @@ namespace DeformableImage
     [RequireComponent(typeof(DeformableImageMesh))]
     public sealed class DeformableImageInteractor : MonoBehaviour
     {
+        private const float ManualDragTravelScale = 0.5f;
+
         public enum DeformationTool
         {
-            Drag,
+            [InspectorName("手动拖拽")] Drag,
             Inflate,
             Pinch,
             Cut,
@@ -29,6 +31,7 @@ namespace DeformableImage
         [Header("Brush")]
         [SerializeField] private DeformationTool activeTool = DeformationTool.Drag;
         [SerializeField, Min(0.01f)] private float brushRadius = 0.75f;
+        [Tooltip("Radial falloff for Inflate / Pinch. Manual Drag uses its own smooth broad grip.")]
         [SerializeField, Range(0.25f, 8f)] private float falloffPower = 2f;
         [SerializeField, Min(0.01f)] private float inflateStrength = 3f;
         [SerializeField, Min(0.01f)] private float wheelRadiusSpeed = 0.15f;
@@ -38,10 +41,19 @@ namespace DeformableImage
         [Header("Cloth-like Dragging")]
         [Tooltip("Only grabs this close to an incision may fold over and reveal the back image. Original silhouette stays anchored.")]
         [SerializeField, Min(0.001f)] private float visibleEdgeGrabDistance = 0.2f;
-        [Tooltip("Interior pulls are clamped to this fraction of the brush radius so the rest of the image remains anchored.")]
+        [Tooltip("Base travel as a fraction of the brush radius. Manual drag uses half of the geometry-safe limit.")]
         [SerializeField, Range(0.05f, 0.45f)] private float maximumInteriorStretch = 0.32f;
         [Tooltip("Prevents intact interior triangles from collapsing to almost zero area.")]
         [SerializeField, Range(0.001f, 0.25f)] private float minimumTriangleAreaRatio = 0.02f;
+
+        [Header("Manual Drag Depth")]
+        [Tooltip("Small lift toward the camera per unit of manual dragging. Separates folded surfaces without preventing incision flips.")]
+        [SerializeField, Range(0f, 0.3f)] private float manualDragDepthRatio = 0.12f;
+        [SerializeField, Min(0f)] private float maximumManualDragDepth = 0.08f;
+        [Header("Incision Manual Drag")]
+        [Tooltip("Base travel near an incision as a fraction of the brush radius. Manual drag uses half of this limit.")]
+        [SerializeField, Range(0.05f, 1.2f)] private float maximumIncisionStretch = 0.6f;
+        [SerializeField] private bool enableLowerEyelidFoldPrototype;
 
         [Header("Release / Pin")]
         [SerializeField, Min(0.05f)] private float reboundDuration = 0.45f;
@@ -59,12 +71,6 @@ namespace DeformableImage
         [SerializeField, Min(0.005f)] private float transparentCutWidth = 0.08f;
         [Tooltip("Mouse-wheel adjustment step while the Cut tool is active.")]
         [SerializeField, Min(0.001f)] private float cutWidthScrollStep = 0.01f;
-        [Tooltip("Keeps the cyan knife preview visible even when the physical cut width is extremely small.")]
-        [FormerlySerializedAs("cutPreviewWidth")]
-        [SerializeField, Min(0.002f)] private float minimumCutPreviewWidth = 0.025f;
-        [SerializeField] private Color cutPreviewColor = new Color(0.1f, 1f, 1f, 0.95f);
-        [Tooltip("Moves the cyan knife preview slightly toward the camera after conforming it to the current 3D skin surface.")]
-        [SerializeField, Min(0.001f)] private float cutPreviewSurfaceOffset = 0.025f;
         [SerializeField, TextArea(2, 4)] private string lastCutStatus = "No cut attempted yet.";
         [SerializeField] private bool showRuntimeToolStatus = true;
 
@@ -143,17 +149,34 @@ namespace DeformableImage
         }
 
         private void OnEnable() { if (!ToolPanels.Contains(this)) ToolPanels.Add(this); }
-        private void OnDisable() { ToolPanels.Remove(this); }
+        private void OnDisable()
+        {
+            if (cutActive) CancelCut();
+            if (deformableMesh != null) deformableMesh.SetDragWeightDisplay(null);
+            ToolPanels.Remove(this);
+        }
         private Vector3[] operationStartVertices;
         private Vector3[] workingVertices;
         private int[] operationTriangles;
         private bool[] operationOutlineAnchors;
         private float[] operationFeatureStrengths;
+        private float[] operationCornerStrengths;
+        private float[] operationDragWeights;
+        private Vector3[] operationMaterialVertices;
+        private Vector2 operationMaterialGrab;
+        private float operationDragLimit;
+        private float[] operationEyeWeights;
+        private static bool showDragWeightDisplay;
+        private Vector3 previousDragInput;
+        private Vector3[] previousDragPose;
+        private Vector3[] dragFramePositions;
         private float[] operationGeodesicDistances;
+        private LowerEyelidDrag operationLowerEyelidDrag;
         private Vector3 operationStartLocalPoint;
         private Vector3 operationStartMousePosition;
         private bool operationActive;
         private bool operationMayRevealBack;
+        private float operationDepthSign = -1f;
         private bool operationPinned;
         private bool reboundActive;
         private float reboundElapsed;
@@ -163,9 +186,8 @@ namespace DeformableImage
         private readonly List<Vector2> cutPathUvs = new List<Vector2>();
         private readonly List<Vector3> cutPathWorld = new List<Vector3>();
         private bool cutActive;
-        private LineRenderer cutPreview;
-        private Material cutPreviewMaterial;
         private DeformableImageMesh activeCutMesh;
+        private int previewedCutPointCount;
 
         public DeformationTool ActiveTool
         {
@@ -225,7 +247,6 @@ namespace DeformableImage
             minimumClosedLoopArea = Mathf.Max(0.00001f, minimumClosedLoopArea);
             transparentCutWidth = Mathf.Max(0.005f, transparentCutWidth);
             cutWidthScrollStep = Mathf.Max(0.001f, cutWidthScrollStep);
-            minimumCutPreviewWidth = Mathf.Max(0.002f, minimumCutPreviewWidth);
             cutPieceGravity = Mathf.Max(0f, cutPieceGravity);
             cutPieceDamping = Mathf.Clamp(cutPieceDamping, 0f, 0.5f);
             cutPieceEdgeStiffness = Mathf.Clamp(cutPieceEdgeStiffness, 0.05f, 1f);
@@ -246,20 +267,6 @@ namespace DeformableImage
             cutPieceReturnSpeed = Mathf.Max(0.1f, cutPieceReturnSpeed);
             cutPieceCollisionThickness = Mathf.Max(0f, cutPieceCollisionThickness);
             cutPieceCollisionFriction = Mathf.Clamp01(cutPieceCollisionFriction);
-            cutPreviewSurfaceOffset = Mathf.Max(0.001f, cutPreviewSurfaceOffset);
-        }
-
-        private void OnDestroy()
-        {
-            if (cutPreview != null)
-            {
-                Destroy(cutPreview.gameObject);
-            }
-
-            if (cutPreviewMaterial != null)
-            {
-                Destroy(cutPreviewMaterial);
-            }
         }
 
         private void OnGUI()
@@ -292,7 +299,7 @@ namespace DeformableImage
         private void DrawToolPanel()
         {
             int selected = GUILayout.SelectionGrid(BoneCutInteractor.IsAnyBoneToolActive ? -1 : (int)activeTool,
-                new[] { "拖拽", "膨胀", "挤压", "组织切割", "皮钩", "牵开器", "剥离器", "缝合" }, 2, FaceRuntimeUILayout.ToolButton);
+                new[] { "手动拖拽", "膨胀", "挤压", "组织切割", "皮钩", "牵开器", "剥离器", "缝合" }, 2, FaceRuntimeUILayout.ToolButton);
             if (selected >= 0) ActiveTool = (DeformationTool)selected;
             BoneCutInteractor.DrawToolButtons(SelectBoneTool);
             GUILayout.Space(6f);
@@ -300,9 +307,22 @@ namespace DeformableImage
             if (BoneCutInteractor.IsAnyBoneToolActive)
                 GUILayout.Label("当前为骨骼切割。左键画闭合轮廓；点击上方任意组织工具即可返回。", FaceRuntimeUILayout.WrappedLabel);
             else if (activeTool == DeformationTool.Cut)
-                GUILayout.Label("左键拖动切割；滚轮调节切口宽度 " + transparentCutWidth.ToString("0.000") + "\n" + lastCutStatus, FaceRuntimeUILayout.WrappedLabel);
+            {
+                GUILayout.Label("按住左键显示透明切割线，松手后切开网格；Esc 取消预览。"
+                    + "\n滚轮调节切口宽度 " + transparentCutWidth.ToString("0.000") + "\n" + lastCutStatus,
+                    FaceRuntimeUILayout.WrappedLabel);
+            }
             else if (activeTool == DeformationTool.Drag)
-                GUILayout.Label("左键拖拽，松手回弹；中键固定。", FaceRuntimeUILayout.WrappedLabel);
+            {
+                if (GUILayout.Button(showDragWeightDisplay ? "隐藏拖拽权重（F8）" : "显示拖拽权重（F8）", FaceRuntimeUILayout.ToolButton))
+                    ToggleDragWeightDisplay();
+                if (showDragWeightDisplay)
+                    GUILayout.Label(operationActive
+                        ? "本次笔刷 · 蓝 0 / 红 1 · 位移上限 " + operationDragLimit.ToString("0.000")
+                        : "部位权重 · 蓝 0 / 红 1 · 按住查看本次笔刷", FaceRuntimeUILayout.WrappedLabel);
+                else
+                    GUILayout.Label("手动拖拽：左键拉动，松手回弹；中键固定。", FaceRuntimeUILayout.WrappedLabel);
+            }
             else if (activeTool == DeformationTool.Inflate || activeTool == DeformationTool.Pinch)
                 GUILayout.Label("按住左键向上拖动以膨胀／挤压。", FaceRuntimeUILayout.WrappedLabel);
             if (instruments != null && !BoneCutInteractor.IsAnyBoneToolActive) instruments.DrawControls();
@@ -341,12 +361,18 @@ namespace DeformableImage
             if (SelectedLayer != null && SelectedLayer != this)
             {
                 if (operationActive || cutActive || reboundActive) CancelCurrentToolOperation();
+                if (deformableMesh != null && deformableMesh.ShowsDragWeights) deformableMesh.SetDragWeightDisplay(null);
                 return;
             }
             if (deformableMesh == null || deformableMesh.LogicalVertexCount == 0)
             {
                 return;
             }
+
+            if (enableKeyboardShortcuts && activeTool == DeformationTool.Drag && !BoneCutInteractor.IsAnyBoneToolActive
+                && Input.GetKeyDown(KeyCode.F8)) ToggleDragWeightDisplay();
+            bool displayWanted = showDragWeightDisplay && activeTool == DeformationTool.Drag && !BoneCutInteractor.IsAnyBoneToolActive;
+            if (displayWanted != deformableMesh.ShowsDragWeights) RefreshDragWeightDisplay();
 
             if (BoneCutInteractor.IsAnyBoneToolActive)
             {
@@ -425,6 +451,34 @@ namespace DeformableImage
             }
         }
 
+        private void ToggleDragWeightDisplay()
+        {
+            showDragWeightDisplay = !showDragWeightDisplay;
+            RefreshDragWeightDisplay();
+        }
+
+        private void RefreshDragWeightDisplay()
+        {
+            if (deformableMesh == null) return;
+            if (!showDragWeightDisplay || activeTool != DeformationTool.Drag || BoneCutInteractor.IsAnyBoneToolActive)
+            {
+                deformableMesh.SetDragWeightDisplay(null);
+                return;
+            }
+
+            if (operationActive && operationDragWeights != null && operationDragWeights.Length == deformableMesh.LogicalVertexCount)
+            {
+                deformableMesh.SetDragWeightDisplay(operationDragWeights);
+                return;
+            }
+
+            float[] regionWeights = deformableMesh.CopyManualCornerStrengths();
+            bool[] anchors = deformableMesh.GetOriginalOutlineAnchors();
+            for (int i = 0; i < regionWeights.Length; i++)
+                if (anchors[i]) regionWeights[i] = 0f;
+            deformableMesh.SetDragWeightDisplay(regionWeights);
+        }
+
         private void HandleShortcuts()
         {
             if (!enableKeyboardShortcuts)
@@ -459,8 +513,6 @@ namespace DeformableImage
                 return;
             }
 
-            StopRebound();
-
             if (IsPointerOverToolUI())
             {
                 return;
@@ -471,43 +523,92 @@ namespace DeformableImage
                 return;
             }
 
-            if (!deformableMesh.TryClassifyGrabPoint(
-                    localPoint,
-                    visibleEdgeGrabDistance,
-                    out _))
+            bool manualDrag = activeTool == DeformationTool.Drag;
+            DeformableImageMesh.ManualDragHit hit = default;
+            if (manualDrag)
+            {
+                Camera cameraToUse = targetCamera != null ? targetCamera : Camera.main;
+                Ray worldRay = cameraToUse.ScreenPointToRay(Input.mousePosition);
+                Transform surface = deformableMesh.transform;
+                var localRay = new Ray(surface.InverseTransformPoint(worldRay.origin),
+                    surface.InverseTransformVector(worldRay.direction));
+                if (!deformableMesh.TryPickManualDragSurface(localRay, out hit)) return;
+            }
+            else if (!deformableMesh.TryClassifyGrabPoint(localPoint, visibleEdgeGrabDistance, out _)
+                || !deformableMesh.HasVertexWithinRadius(localPoint, brushRadius))
             {
                 return;
             }
 
-            if (!deformableMesh.HasVertexWithinRadius(localPoint, brushRadius))
-            {
-                return;
-            }
-
+            StopRebound();
             operationStartVertices = deformableMesh.CopyCurrentVertices();
             operationOutlineAnchors = deformableMesh.CopyOriginalOutlineAnchors();
-            operationFeatureStrengths = deformableMesh.CopyToolStretchStrengths();
-            operationMayRevealBack = deformableMesh.IsNearCutBoundary(localPoint, visibleEdgeGrabDistance);
+            operationFeatureStrengths = manualDrag ? null : deformableMesh.CopyToolStretchStrengths();
+            operationCornerStrengths = manualDrag ? deformableMesh.CopyManualCornerStrengths() : null;
             workingVertices = new Vector3[operationStartVertices.Length];
             operationTriangles = deformableMesh.CopyMechanicallyIntactTriangles();
-            deformableMesh.TryBuildGeodesicDistances(
-                localPoint,
-                brushRadius,
-                out operationGeodesicDistances);
+            if (manualDrag) PrepareManualDragMaterial(hit);
+            else
+            {
+                operationMayRevealBack = deformableMesh.IsNearCutBoundary(localPoint, visibleEdgeGrabDistance);
+                deformableMesh.TryBuildGeodesicDistances(localPoint, brushRadius, out operationGeodesicDistances);
+            }
+            operationLowerEyelidDrag = manualDrag && enableLowerEyelidFoldPrototype
+                ? deformableMesh.CreateLowerEyelidDrag(localPoint, operationGeodesicDistances)
+                : null;
             operationStartLocalPoint = localPoint;
+            previousDragInput = Vector3.zero;
+            if (manualDrag)
+            {
+                PrepareManualDrag();
+                previousDragPose = (Vector3[])operationStartVertices.Clone();
+                dragFramePositions = new Vector3[operationStartVertices.Length];
+            }
+            operationDepthSign = ManualDragDepthSign(localPoint);
             operationStartMousePosition = Input.mousePosition;
             operationPinned = false;
             operationActive = true;
+            if (manualDrag && showDragWeightDisplay) RefreshDragWeightDisplay();
+        }
+
+        private void PrepareManualDragMaterial(DeformableImageMesh.ManualDragHit hit)
+        {
+            operationMaterialVertices = deformableMesh.CopyMaterialSpaceVertices();
+            operationMaterialGrab = hit.MaterialPoint;
+            operationMayRevealBack = deformableMesh.IsNearMaterialCutBoundary(hit.MaterialPoint, visibleEdgeGrabDistance);
+            operationGeodesicDistances = deformableMesh.BuildManualDragDistances(hit, brushRadius, out operationEyeWeights);
+        }
+
+        private float ManualDragDepthSign(Vector3 localPoint)
+        {
+            Camera cameraToUse = targetCamera != null ? targetCamera : Camera.main;
+            Vector3 towardCamera = cameraToUse != null
+                ? (cameraToUse.orthographic ? -cameraToUse.transform.forward
+                    : cameraToUse.transform.position - deformableMesh.transform.TransformPoint(localPoint))
+                : -deformableMesh.transform.forward;
+            // The sprite is authored in local XY. In Facetest, local -Z maps to world +Y.
+            float localDepth = deformableMesh.transform.InverseTransformVector(towardCamera).z;
+            return localDepth >= 0f ? 1f : -1f;
         }
 
         private void UpdateOperation()
         {
+            if (deformableMesh.LogicalVertexCount != operationStartVertices.Length)
+            {
+                ClearOperationState();
+                return;
+            }
             if (!TryGetLocalPointerPosition(out Vector3 localPoint))
             {
                 return;
             }
 
             Vector3 dragDelta = localPoint - operationStartLocalPoint;
+            if (activeTool == DeformationTool.Drag)
+            {
+                if (dragDelta == previousDragInput) return;
+                previousDragInput = dragDelta;
+            }
             float verticalMouseDelta = (Input.mousePosition.y - operationStartMousePosition.y)
                 / Mathf.Max(1f, Screen.height);
             float scaleDelta = verticalMouseDelta * inflateStrength;
@@ -516,7 +617,34 @@ namespace DeformableImage
                 scaleDelta = -scaleDelta;
             }
 
+            BuildSafeWorkingVertices(dragDelta, scaleDelta);
+
+            if (activeTool == DeformationTool.Drag) ApplyManualDragDelta();
+            else deformableMesh.SetManualVertices(workingVertices);
+        }
+
+        private void ApplyManualDragDelta()
+        {
+            // Expressions and retained instruments can change the surface between
+            // mouse updates. Apply only the change owned by this gesture.
+            for (int i = 0; i < dragFramePositions.Length; i++)
+                dragFramePositions[i] = deformableMesh.GetLogicalVertex(i) + (workingVertices[i] - previousDragPose[i]);
+            deformableMesh.SetManualVertices(dragFramePositions);
+            System.Array.Copy(workingVertices, previousDragPose, workingVertices.Length);
+        }
+
+        private Vector3[] CurrentPoseWithoutDrag()
+        {
+            if (previousDragPose == null) return operationStartVertices;
+            for (int i = 0; i < dragFramePositions.Length; i++)
+                dragFramePositions[i] = deformableMesh.GetLogicalVertex(i) - (previousDragPose[i] - operationStartVertices[i]);
+            return dragFramePositions;
+        }
+
+        private void BuildSafeWorkingVertices(Vector3 dragDelta, float scaleDelta)
+        {
             BuildWorkingVertices(dragDelta, scaleDelta, 1f);
+            if (activeTool == DeformationTool.Drag) return;
 
             if (!operationMayRevealBack
                 && !PreservesTriangleOrientation(operationStartVertices, workingVertices))
@@ -524,8 +652,8 @@ namespace DeformableImage
                 float safeScale = 0f;
                 float unsafeScale = 1f;
 
-                // Binary-search the strongest deformation that keeps every intact triangle
-                // on its current side.
+                // Preserve the original interior orientation guard. Incision grabs
+                // intentionally retain their previous freedom to fold.
                 for (int iteration = 0; iteration < 12; iteration++)
                 {
                     float candidateScale = (safeScale + unsafeScale) * 0.5f;
@@ -543,14 +671,185 @@ namespace DeformableImage
                 BuildWorkingVertices(dragDelta, scaleDelta, safeScale);
             }
 
-            deformableMesh.SetManualVertices(workingVertices);
         }
 
-        private void BuildWorkingVertices(Vector3 dragDelta, float scaleDelta, float deformationScale)
+        private void PrepareManualDrag()
         {
-            Vector3 localDrag = Vector3.ClampMagnitude(
-                dragDelta,
-                brushRadius * maximumInteriorStretch);
+            Vector3[] reference = operationMaterialVertices ?? operationStartVertices;
+            Vector2 grip = operationMaterialVertices != null ? operationMaterialGrab : (Vector2)operationStartLocalPoint;
+            operationDragWeights = new float[operationStartVertices.Length];
+            for (int i = 0; i < operationDragWeights.Length; i++)
+            {
+                if (operationOutlineAnchors != null && operationOutlineAnchors[i]) continue;
+                // Reachability protects opposite cut lips. Use the smooth material
+                // radius inside the reachable area, rather than zigzag edge lengths.
+                if (operationGeodesicDistances != null && float.IsPositiveInfinity(operationGeodesicDistances[i])) continue;
+                float distance = Vector2.Distance(reference[i], grip);
+                float corner = operationCornerStrengths != null ? operationCornerStrengths[i] : 1f;
+                float eye = operationEyeWeights != null ? operationEyeWeights[i] : 1f;
+                operationDragWeights[i] = FeatureBoundaryMath.ManualDragFalloff(distance / brushRadius) * corner * eye;
+            }
+
+            operationDragLimit = brushRadius * (operationMayRevealBack ? maximumIncisionStretch : maximumInteriorStretch);
+            if (!operationMayRevealBack && operationTriangles != null)
+                RelaxManualDragWeights(reference);
+            operationDragLimit *= ManualDragTravelScale;
+        }
+
+        private struct DragTriangleGradient
+        {
+            public int A, B, C;
+            public Vector2 AGradient, BGradient, CGradient;
+        }
+
+        private void RelaxManualDragWeights(Vector3[] reference)
+        {
+            // Each triangle constrains the slope of its own brush field. Reducing
+            // that slope locally keeps one thin cut triangle from capping all travel.
+            float allowedSlope = (1f - minimumTriangleAreaRatio) / operationDragLimit;
+            var included = new bool[operationDragWeights.Length];
+            for (int i = 0; i < included.Length; i++) included[i] = operationDragWeights[i] > 0f;
+            var triangles = new List<DragTriangleGradient>();
+            for (int i = 0; i < operationTriangles.Length; i += 3)
+            {
+                int a = operationTriangles[i], b = operationTriangles[i + 1], c = operationTriangles[i + 2];
+                if (!included[a] && !included[b] && !included[c]) continue;
+                Vector2 ab = reference[b] - reference[a];
+                Vector2 ac = reference[c] - reference[a];
+                float area = ab.x * ac.y - ab.y * ac.x;
+                if (Mathf.Abs(area) < 1e-7f) continue;
+                Vector2 bGradient = new Vector2(ac.y, -ac.x) / area;
+                Vector2 cGradient = new Vector2(-ab.y, ab.x) / area;
+                triangles.Add(new DragTriangleGradient
+                {
+                    A = a, B = b, C = c,
+                    AGradient = -bGradient - cGradient,
+                    BGradient = bGradient,
+                    CGradient = cGradient
+                });
+            }
+
+            // Leave a small margin for neighbouring triangles that share vertices.
+            float targetSlope = allowedSlope * 0.80f;
+            if (triangles.Count > 0) FadeSharpBrushEdges(reference, triangles, targetSlope);
+            for (int pass = 0; pass < 48; pass++)
+            {
+                bool changed = false;
+                for (int index = 0; index < triangles.Count; index++)
+                {
+                    DragTriangleGradient tri = triangles[pass % 2 == 0 ? index : triangles.Count - index - 1];
+                    Vector2 gradient = GetDragWeightGradient(tri);
+                    float slope = gradient.magnitude;
+                    if (slope <= allowedSlope) continue;
+                    Vector2 axis = gradient / slope;
+                    float a = included[tri.A] ? Vector2.Dot(tri.AGradient, axis) : 0f;
+                    float b = included[tri.B] ? Vector2.Dot(tri.BGradient, axis) : 0f;
+                    float c = included[tri.C] ? Vector2.Dot(tri.CGradient, axis) : 0f;
+                    float share = a * a + b * b + c * c;
+                    if (share <= 1e-8f) continue;
+                    float correction = (slope - targetSlope) / share;
+                    if (included[tri.A]) AdjustDragWeight(tri.A, -a * correction);
+                    if (included[tri.B]) AdjustDragWeight(tri.B, -b * correction);
+                    if (included[tri.C]) AdjustDragWeight(tri.C, -c * correction);
+                    changed = true;
+                }
+                if (!changed) break;
+            }
+
+            // Keep the orientation guard for intact surface. A thin strip formed
+            // by clipping an incision is part of its free lip; its projected
+            // winding is too sensitive to use as a limit for the entire stroke.
+            foreach (DragTriangleGradient triangle in triangles)
+            {
+                float slope = GetDragWeightGradient(triangle).magnitude;
+                if (slope <= allowedSlope) continue;
+                Vector2 a = reference[triangle.A], b = reference[triangle.B], c = reference[triangle.C];
+                float longestSquared = Mathf.Max((b - a).sqrMagnitude, Mathf.Max((c - a).sqrMagnitude, (c - b).sqrMagnitude));
+                float area = Mathf.Abs(SignedDoubleArea(a, b, c));
+                if (area <= longestSquared * 0.12f && deformableMesh != null
+                    && deformableMesh.IsNearMaterialCutBoundary((a + b + c) / 3f, 0.05f))
+                    continue;
+                operationDragLimit = Mathf.Min(operationDragLimit, (1f - minimumTriangleAreaRatio) / slope);
+            }
+        }
+
+        private void FadeSharpBrushEdges(Vector3[] reference, List<DragTriangleGradient> triangles, float slope)
+        {
+            // A hard cut/outline exclusion can sit very close to a movable vertex
+            // on clipped topology. Feather that boundary through intact edges.
+            for (int pass = 0; pass < 16; pass++)
+            {
+                bool changed = false;
+                for (int index = 0; index < triangles.Count; index++)
+                {
+                    DragTriangleGradient triangle = triangles[pass % 2 == 0 ? index : triangles.Count - index - 1];
+                    changed |= LimitEdge(triangle.A, triangle.B);
+                    changed |= LimitEdge(triangle.B, triangle.C);
+                    changed |= LimitEdge(triangle.C, triangle.A);
+                }
+                if (!changed) break;
+            }
+
+            bool LimitEdge(int a, int b)
+            {
+                if (operationDragWeights[a] < operationDragWeights[b]) (a, b) = (b, a);
+                float maximum = operationDragWeights[b] + Vector2.Distance(reference[a], reference[b]) * slope;
+                if (operationDragWeights[a] <= maximum) return false;
+                operationDragWeights[a] = maximum;
+                return true;
+            }
+        }
+
+        private Vector2 GetDragWeightGradient(DragTriangleGradient triangle)
+        {
+            float a = operationDragWeights[triangle.A];
+            return triangle.BGradient * (operationDragWeights[triangle.B] - a)
+                + triangle.CGradient * (operationDragWeights[triangle.C] - a);
+        }
+
+        private void AdjustDragWeight(int index, float correction)
+        {
+            float maximum = operationCornerStrengths != null ? operationCornerStrengths[index] : 1f;
+            operationDragWeights[index] = Mathf.Clamp(operationDragWeights[index] + correction, 0.00001f, maximum);
+        }
+
+        private void BuildManualDragVertices(Vector3 dragDelta)
+        {
+            float length = dragDelta.magnitude;
+            float distance = Mathf.Min(length, operationDragLimit);
+            if (!operationMayRevealBack)
+            {
+                float easeLength = operationDragLimit * 0.2f;
+                float easeStart = operationDragLimit - easeLength;
+                if (easeLength > 0f && length > easeStart)
+                    distance = operationDragLimit - easeLength / (1f + (length - easeStart) / easeLength);
+            }
+            Vector3 displacement = length > 0f ? dragDelta * (distance / length) : Vector3.zero;
+            displacement.z += Mathf.Min(distance * manualDragDepthRatio, maximumManualDragDepth) * operationDepthSign;
+            if (operationMayRevealBack) displacement = Vector3.ClampMagnitude(displacement, operationDragLimit);
+            for (int i = 0; i < workingVertices.Length; i++)
+                workingVertices[i] = operationStartVertices[i] + displacement * operationDragWeights[i];
+        }
+
+        private bool BuildWorkingVertices(Vector3 dragDelta, float scaleDelta, float deformationScale)
+        {
+            float translationScale = 1f;
+            float foldAngle = operationLowerEyelidDrag != null
+                ? operationLowerEyelidDrag.GetFoldAngle(dragDelta, out translationScale) * deformationScale : 0f;
+            if (activeTool == DeformationTool.Drag && foldAngle <= 0f)
+            {
+                if (operationDragWeights == null || operationDragWeights.Length != operationStartVertices.Length)
+                    PrepareManualDrag();
+                BuildManualDragVertices(dragDelta * translationScale);
+                return false;
+            }
+
+            bool incisionDrag = operationMayRevealBack || foldAngle > 0f;
+            float maximumTravel = brushRadius * (incisionDrag ? maximumIncisionStretch : maximumInteriorStretch)
+                * ManualDragTravelScale;
+            Vector3 localDrag = Vector3.ClampMagnitude(dragDelta, maximumTravel) * translationScale;
+            float depthLift = Mathf.Min(localDrag.magnitude * manualDragDepthRatio, maximumManualDragDepth)
+                * operationDepthSign;
 
             for (int i = 0; i < operationStartVertices.Length; i++)
             {
@@ -570,23 +869,32 @@ namespace DeformableImage
                 if (distance <= brushRadius)
                 {
                     float normalizedDistance = distance / brushRadius;
-                    weight = Mathf.Pow(1f - Mathf.Clamp01(normalizedDistance), falloffPower);
+                    weight = activeTool == DeformationTool.Drag
+                        ? FeatureBoundaryMath.ManualDragFalloff(normalizedDistance)
+                        : Mathf.Pow(1f - Mathf.Clamp01(normalizedDistance), falloffPower);
                 }
                 float featureStrength = operationFeatureStrengths != null && i < operationFeatureStrengths.Length
                     ? operationFeatureStrengths[i] : 1f;
+                if (activeTool == DeformationTool.Drag && operationEyeWeights != null) weight *= operationEyeWeights[i];
+                float brushWeight = weight;
                 weight *= featureStrength;
 
                 if (activeTool == DeformationTool.Drag)
                 {
-                    if (operationMayRevealBack)
-                    {
-                        workingVertices[i] = original + dragDelta * weight;
-                    }
-                    else
-                    {
-                        workingVertices[i] = original
-                            + localDrag * (weight * deformationScale);
-                    }
+                    if (operationCornerStrengths != null && i < operationCornerStrengths.Length)
+                        weight *= operationCornerStrengths[i];
+                    // Limit the shared displacement before weighting. Clamping each
+                    // vertex afterwards lets weak distant vertices overtake the centre
+                    // during large pulls and introduces a ring of crushed tissue.
+                    workingVertices[i] = original + localDrag * (weight * deformationScale);
+                    // Use the same weight as the planar pull: overlapping fold branches
+                    // acquire distinct depths rather than competing on one plane.
+                    workingVertices[i].z += depthLift * weight * deformationScale;
+                    if (foldAngle > 0f && brushWeight > 0f)
+                        workingVertices[i] += operationLowerEyelidDrag.GetFoldOffset(i, foldAngle, brushWeight, operationDepthSign);
+                    if (incisionDrag)
+                        workingVertices[i] = original + Vector3.ClampMagnitude(workingVertices[i] - original,
+                            maximumTravel * featureStrength);
                 }
                 else
                 {
@@ -594,12 +902,13 @@ namespace DeformableImage
                     workingVertices[i] = original
                         + radialDirection * (scaleDelta * weight * deformationScale);
                 }
-                // Only a per-stroke pull limit: no cumulative displacement budget,
-                // fixed eyelid/lip contour, or stronger corner anchors.
+                // Only a per-stroke pull limit; eye-corner resistance above is a soft
+                // manual response, not a fixed contour or cumulative displacement budget.
                 if (featureStrength < 0.999f)
                     workingVertices[i] = original + Vector3.ClampMagnitude(workingVertices[i] - original,
                         brushRadius * 1.2f * featureStrength);
             }
+            return foldAngle > 0f;
         }
 
         private bool PreservesTriangleOrientation(Vector3[] baseline, Vector3[] candidate)
@@ -635,6 +944,7 @@ namespace DeformableImage
                 {
                     return false;
                 }
+
             }
 
             return true;
@@ -652,7 +962,7 @@ namespace DeformableImage
                 && !operationPinned
                 && operationStartVertices != null)
             {
-                StartRebound(operationStartVertices);
+                StartRebound(CurrentPoseWithoutDrag());
             }
 
             ClearOperationState();
@@ -666,16 +976,24 @@ namespace DeformableImage
             operationTriangles = null;
             operationOutlineAnchors = null;
             operationFeatureStrengths = null;
+            operationCornerStrengths = null;
+            operationDragWeights = null;
+            operationMaterialVertices = null;
+            previousDragPose = null;
+            dragFramePositions = null;
             operationGeodesicDistances = null;
+            operationLowerEyelidDrag = null;
+            operationEyeWeights = null;
             operationMayRevealBack = false;
             operationPinned = false;
+            if (deformableMesh != null && deformableMesh.ShowsDragWeights) RefreshDragWeightDisplay();
         }
 
         private void CancelOperation()
         {
-            if (operationStartVertices != null)
+            if (operationStartVertices != null && operationStartVertices.Length == deformableMesh.LogicalVertexCount)
             {
-                deformableMesh.SetManualVertices(operationStartVertices);
+                deformableMesh.SetManualVertices(CurrentPoseWithoutDrag());
             }
 
             ClearOperationState();
@@ -755,6 +1073,7 @@ namespace DeformableImage
 
             if (cutActive && Input.GetMouseButtonUp(0))
             {
+                AddCutPoint(true);
                 CompleteCut();
             }
 
@@ -780,7 +1099,6 @@ namespace DeformableImage
             transparentCutWidth = Mathf.Max(
                 0.005f,
                 transparentCutWidth + wheel * cutWidthScrollStep);
-            UpdateCutPreviewWidth();
             lastCutStatus = "Transparent cut width: " + transparentCutWidth.ToString("0.000");
         }
 
@@ -805,10 +1123,9 @@ namespace DeformableImage
             StopRebound();
             cutPathUvs.Clear();
             cutPathWorld.Clear();
+            previewedCutPointCount = 0;
             cutActive = true;
             lastCutStatus = "Drawing cut on " + GetCutLayerName(activeCutMesh) + "...";
-            EnsureCutPreview();
-            cutPreview.positionCount = 0;
             AddCutPoint();
 
             if (cutPathUvs.Count == 0)
@@ -817,44 +1134,37 @@ namespace DeformableImage
             }
         }
 
-        private void AddCutPoint()
+        private void AddCutPoint(bool forceEndpoint = false)
         {
             DeformableImageMesh cutMesh = activeCutMesh != null
                 ? activeCutMesh
                 : deformableMesh;
             if (!TryGetLocalPointerPosition(cutMesh, out Vector3 localPoint)
-                || !cutMesh.TryGetNormalizedUvAtCurrentPoint(
-                    localPoint,
-                    out Vector2 normalizedUv,
-                    out Vector3 surfacePoint))
+                || !cutMesh.TryGetNormalizedUvAtCurrentPoint(localPoint,
+                    out Vector2 normalizedUv, out Vector3 surfacePoint))
             {
                 return;
             }
 
             Vector3 worldPoint = cutMesh.transform.TransformPoint(surfacePoint);
-            Camera cameraToUse = targetCamera != null ? targetCamera : Camera.main;
-            if (cameraToUse != null)
-            {
-                Vector3 towardCamera = cameraToUse.orthographic
-                    ? -cameraToUse.transform.forward
-                    : (cameraToUse.transform.position - worldPoint).normalized;
-                worldPoint += towardCamera * cutPreviewSurfaceOffset;
-            }
-            else
-            {
-                worldPoint -= transform.forward * cutPreviewSurfaceOffset;
-            }
-
             if (cutPathWorld.Count > 0
-                && Vector3.Distance(cutPathWorld[cutPathWorld.Count - 1], worldPoint) < cutPointSpacing)
+                && Vector3.Distance(cutPathWorld[cutPathWorld.Count - 1], worldPoint)
+                    < (forceEndpoint ? 0.0001f : cutPointSpacing))
             {
                 return;
             }
 
             cutPathUvs.Add(normalizedUv);
             cutPathWorld.Add(worldPoint);
-            cutPreview.positionCount = cutPathWorld.Count;
-            cutPreview.SetPosition(cutPathWorld.Count - 1, worldPoint);
+            UpdateCutMaskPreview();
+        }
+
+        private void UpdateCutMaskPreview()
+        {
+            DeformableImageMesh cutMesh = activeCutMesh != null ? activeCutMesh : deformableMesh;
+            if (cutMesh == null || cutPathUvs.Count < 2) return;
+            cutMesh.PreviewOpenCut(cutPathUvs, Mathf.Max(0, previewedCutPointCount - 1), transparentCutWidth);
+            previewedCutPointCount = cutPathUvs.Count;
         }
 
         private void CompleteCut()
@@ -865,15 +1175,13 @@ namespace DeformableImage
                 : deformableMesh;
             string cutLayerName = GetCutLayerName(cutMesh);
             cutActive = false;
-            if (cutPreview != null)
-            {
-                cutPreview.positionCount = 0;
-            }
+            cutMesh.EndCutPreview();
 
             if (cutPathUvs.Count < 2)
             {
                 lastCutStatus = "Cut ignored: fewer than two sampled points.";
                 Debug.LogWarning(lastCutStatus, this);
+                ClearCutStroke();
                 return;
             }
 
@@ -957,8 +1265,7 @@ namespace DeformableImage
                 Debug.LogWarning(lastCutStatus, this);
             }
 
-            cutPathUvs.Clear();
-            cutPathWorld.Clear();
+            ClearCutStroke();
         }
 
         private void ConfigureDetachedPiece(DeformableImageMesh piece)
@@ -1375,55 +1682,19 @@ namespace DeformableImage
 
         private void CancelCut()
         {
+            ClearCutStroke();
+            lastCutStatus = "已取消透明切割预览，组织未被切开。";
+        }
+
+        private void ClearCutStroke()
+        {
             cutActive = false;
+            DeformableImageMesh cutMesh = activeCutMesh != null ? activeCutMesh : deformableMesh;
+            if (cutMesh != null) cutMesh.EndCutPreview();
             cutPathUvs.Clear();
             cutPathWorld.Clear();
-            if (cutPreview != null)
-            {
-                cutPreview.positionCount = 0;
-            }
-        }
-
-        private void EnsureCutPreview()
-        {
-            if (cutPreview == null)
-            {
-                GameObject previewObject = new GameObject("Cut Preview");
-                cutPreview = previewObject.AddComponent<LineRenderer>();
-                cutPreview.useWorldSpace = true;
-                cutPreview.loop = false;
-                cutPreview.numCapVertices = 4;
-                cutPreview.numCornerVertices = 4;
-                cutPreview.startColor = cutPreviewColor;
-                cutPreview.endColor = cutPreviewColor;
-
-                Shader shader = Shader.Find("Sprites/Default");
-                if (shader != null)
-                {
-                    cutPreviewMaterial = new Material(shader)
-                    {
-                        name = "Cut Preview Material",
-                        hideFlags = HideFlags.DontSave
-                    };
-                    cutPreview.material = cutPreviewMaterial;
-                }
-
-                cutPreview.sortingOrder = short.MaxValue;
-            }
-
-            UpdateCutPreviewWidth();
-        }
-
-        private void UpdateCutPreviewWidth()
-        {
-            if (cutPreview == null)
-            {
-                return;
-            }
-
-            float previewWidth = Mathf.Max(minimumCutPreviewWidth, transparentCutWidth);
-            cutPreview.startWidth = previewWidth;
-            cutPreview.endWidth = previewWidth;
+            previewedCutPointCount = 0;
+            activeCutMesh = null;
         }
 
         private void ResolveLayeredCutTargets()

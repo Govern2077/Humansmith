@@ -46,6 +46,18 @@ namespace DeformableImage
         [SerializeField] private FacialCutCurve2D rightEye;
         [SerializeField] private FacialCutCurve2D mouth;
 
+        [Header("Lower Eyelid Drag")]
+        [Tooltip("Downward drag distance, in local units, that starts folding the left lower eyelid at the cut edge.")]
+        [SerializeField, Min(0.001f)] private float leftLowerEyelidFoldThreshold = 0.035f;
+        [Tooltip("Downward drag distance, in local units, that starts folding the right lower eyelid at the cut edge.")]
+        [SerializeField, Min(0.001f)] private float rightLowerEyelidFoldThreshold = 0.055f;
+        [Tooltip("Distance from the cut lip to the strip of cheek supporting the fold, in local units.")]
+        [SerializeField, Min(0.01f)] private float lowerEyelidFoldWidth = 0.24f;
+
+        internal float LowerEyelidFoldWidth => Mathf.Max(0.01f, lowerEyelidFoldWidth);
+        internal float GetLowerEyelidFoldThreshold(int eyeIndex) =>
+            Mathf.Max(0.001f, eyeIndex == 0 ? leftLowerEyelidFoldThreshold : rightLowerEyelidFoldThreshold);
+
         [Header("Editor Curve Preview")]
         [SerializeField] private bool showEditorPreview = true;
         [SerializeField] private bool showControlPolygon = true;

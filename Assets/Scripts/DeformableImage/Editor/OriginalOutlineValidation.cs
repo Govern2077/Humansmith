@@ -78,6 +78,7 @@ namespace DeformableImage.Editor
             Set(tool, "operationStartVertices", baseline);
             Set(tool, "operationOutlineAnchors", anchors);
             Set(tool, "workingVertices", new Vector3[baseline.Length]);
+            Set(tool, "operationDragWeights", null);
             Set(tool, "operationStartLocalPoint", Vector3.zero);
             Set(tool, "brushRadius", 10f);
             Set(tool, "operationMayRevealBack", true);

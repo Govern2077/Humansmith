@@ -97,6 +97,9 @@ namespace DeformableImage
         private Vector3[] poseRestVertices = Array.Empty<Vector3>();
         private Vector3[] logicalVertices = Array.Empty<Vector3>();
         private Vector3[] renderVertices = Array.Empty<Vector3>();
+        private Mesh dragWeightDisplayMesh;
+        private Color32[] dragWeightColors = Array.Empty<Color32>();
+        internal bool ShowsDragWeights => dragWeightDisplayMesh != null && dragWeightDisplayMesh == generatedMesh;
         private int[] logicalTriangles = Array.Empty<int>();
         private readonly List<Vector2[]> visibleContours = new List<Vector2[]>();
         private readonly List<Vector2> visibleBoundarySegments = new List<Vector2>();
@@ -106,6 +109,9 @@ namespace DeformableImage
         private FacialFeaturePrecut2D toolFeatureCurves;
         private Vector3[] toolStrengthRestSource;
         private float[] toolFeatureStrengths = Array.Empty<float>();
+        private float[] manualCornerStrengths = Array.Empty<float>();
+        private Vector3[] manualCornerRestSource;
+        private int manualCornerCurveHash;
         private int toolCurveHash;
         private bool toolStrengthsPrepared;
         private bool[] originalOutlineAnchors;
@@ -117,6 +123,10 @@ namespace DeformableImage
         private byte[] cutMaskAlpha = Array.Empty<byte>();
         private Color32[] cutMaskPixels = Array.Empty<Color32>();
         private Texture2D cutMaskTexture;
+        private Texture2D cutPreviewTexture;
+        private Color32[] cutPreviewPixels = Array.Empty<Color32>();
+        private bool cutPreviewActive;
+        public bool HasCutPreview { get { return cutPreviewActive; } }
         private byte[] cutVisualAlpha = Array.Empty<byte>();
         private Color32[] cutVisualPixels = Array.Empty<Color32>();
         private Texture2D cutVisualTexture;
@@ -607,16 +617,21 @@ namespace DeformableImage
         /// </summary>
         public bool[] CopyOriginalOutlineAnchors()
         {
+            return (bool[])GetOriginalOutlineAnchors().Clone();
+        }
+
+        internal bool[] GetOriginalOutlineAnchors()
+        {
             if (originalOutlineAnchors != null && ReferenceEquals(outlineRestSource, restVertices)
                 && ReferenceEquals(outlineTriangleSource, logicalTriangles)
                 && ReferenceEquals(outlineAlphaSource, alphaMask))
-                return (bool[])originalOutlineAnchors.Clone();
+                return originalOutlineAnchors;
 
             originalOutlineAnchors = new bool[restVertices.Length];
             outlineRestSource = restVertices;
             outlineTriangleSource = logicalTriangles;
             outlineAlphaSource = alphaMask;
-            if (detachedFromMesh != null) return (bool[])originalOutlineAnchors.Clone();
+            if (detachedFromMesh != null) return originalOutlineAnchors;
 
             int[] integral = alphaMask.Length > 0
                 ? OriginalOutlineMath.BuildExteriorIntegral(alphaMask, alphaMaskWidth, alphaMaskHeight) : null;
@@ -648,13 +663,19 @@ namespace DeformableImage
                 }
                 if (touches) originalOutlineAnchors[a] = originalOutlineAnchors[b] = originalOutlineAnchors[c] = true;
             }
-            return (bool[])originalOutlineAnchors.Clone();
+            return originalOutlineAnchors;
         }
 
         /// <summary>Only an actual incision grants unrestricted attached-surface dragging.</summary>
         public bool IsNearCutBoundary(Vector3 currentLocalPoint, float distance)
         {
             if (!hasAppliedCuts || !TryMapCurrentPointToRest(currentLocalPoint, out Vector2 restPoint)) return false;
+            return IsNearMaterialCutBoundary(restPoint, distance);
+        }
+
+        internal bool IsNearMaterialCutBoundary(Vector2 restPoint, float distance)
+        {
+            if (!hasAppliedCuts) return false;
             foreach (CutBarrier barrier in openCutBarriers)
             {
                 float reach = distance + barrier.Radius;
@@ -682,21 +703,110 @@ namespace DeformableImage
         {
             toolFeatureCurves = curves;
             toolStrengthsPrepared = false;
+            manualCornerRestSource = null;
+        }
+
+        internal LowerEyelidDrag CreateLowerEyelidDrag(Vector3 point, float[] brushDistances)
+        {
+            if (toolFeatureCurves == null || toolFeatureCurves.SkinLayer != this
+                || brushDistances == null || !TryMapCurrentPointToRest(point, out Vector2 restPoint))
+                return null;
+
+            // Use the actual cut's material path. Authored guides alone, or a nearby
+            // unrelated knife stroke, cannot start a lower eyelid fold.
+            LowerEyelidDrag drag = null;
+            float nearest = float.PositiveInfinity;
+            for (int eye = 0; eye < 2; eye++)
+            {
+                var guide = toolFeatureCurves.GetSampledEditableCurve(eye);
+                if (guide.Count < 2) continue;
+                foreach (CutBarrier cut in openCutBarriers)
+                {
+                    if (!MatchesEyeCut(cut, guide, false) && !MatchesEyeCut(cut, guide, true)) continue;
+
+                    var profile = new LowerEyelidDrag(cut.Points, cut.Radius, toolFeatureCurves.LowerEyelidFoldWidth);
+                    if (!profile.TryBegin(restPoint, toolFeatureCurves.GetLowerEyelidFoldThreshold(eye), out float distance)
+                        || distance >= nearest) continue;
+                    nearest = distance;
+                    drag = profile;
+                }
+            }
+
+            drag?.BindVertices(restVertices, brushDistances);
+            return drag;
+        }
+
+        private bool MatchesEyeCut(CutBarrier cut, List<Vector2> guide, bool reversed)
+        {
+            if (cut.Points.Length != guide.Count) return false;
+            for (int i = 0; i < guide.Count; i++)
+            {
+                Vector2 expected = gridMinimum + Vector2.Scale(guide[i], gridSize);
+                int index = reversed ? guide.Count - 1 - i : i;
+                if ((cut.Points[index] - expected).sqrMagnitude > 0.005f * 0.005f) return false;
+            }
+            return true;
         }
 
         public float[] CopyToolStretchStrengths()
         {
-            if (toolFeatureCurves == null && !toolStrengthsPrepared)
+            PrepareToolStrengths();
+            return (float[])toolFeatureStrengths.Clone();
+        }
+
+        public float[] CopyManualCornerStrengths()
+        {
+            ResolveToolFeatureCurves();
+            int hash = toolFeatureCurves != null ? toolFeatureCurves.CalculateCurveHash() : 0;
+            if (ReferenceEquals(manualCornerRestSource, restVertices) && manualCornerCurveHash == hash)
+                return (float[])manualCornerStrengths.Clone();
+
+            manualCornerRestSource = restVertices;
+            manualCornerCurveHash = hash;
+            manualCornerStrengths = new float[restVertices.Length];
+            for (int i = 0; i < manualCornerStrengths.Length; i++) manualCornerStrengths[i] = 1f;
+            if (toolFeatureCurves != null && detachedFromMesh == null)
+            {
+                for (int curveIndex = 0; curveIndex < 3; curveIndex++)
+                {
+                    var points = toolFeatureCurves.GetEditableCurve(curveIndex).ControlPoints;
+                    if (points.Count < 2) continue;
+                    Vector2 start = gridMinimum + Vector2.Scale(points[0], gridSize);
+                    Vector2 end = gridMinimum + Vector2.Scale(points[points.Count - 1], gridSize);
+                    float width = Vector2.Distance(start, end);
+                    float minimumStrength = curveIndex < 2 ? FeatureBoundaryMath.ManualEyeCornerStrength : 0.3f;
+                    for (int i = 0; i < restVertices.Length; i++)
+                    {
+                        float distance = Mathf.Min(Vector2.Distance(restVertices[i], start), Vector2.Distance(restVertices[i], end));
+                        manualCornerStrengths[i] = Mathf.Min(manualCornerStrengths[i],
+                            FeatureBoundaryMath.ManualCornerStrength(distance, width, minimumStrength));
+                    }
+                }
+            }
+            return (float[])manualCornerStrengths.Clone();
+        }
+
+        private void ResolveToolFeatureCurves()
+        {
+            if (toolFeatureCurves == null && !toolStrengthsPrepared && manualCornerRestSource == null)
                 foreach (var curves in FindObjectsOfType<FacialFeaturePrecut2D>())
                     if (curves.SkinLayer == this || curves.FatLayer == this || curves.MuscleLayer == this)
                     { toolFeatureCurves = curves; break; }
+        }
+
+        private void PrepareToolStrengths()
+        {
+            ResolveToolFeatureCurves();
             int hash = toolFeatureCurves != null ? toolFeatureCurves.CalculateCurveHash() : 0;
             if (toolStrengthsPrepared && ReferenceEquals(toolStrengthRestSource, restVertices) && toolCurveHash == hash)
-                return (float[])toolFeatureStrengths.Clone();
+                return;
             toolStrengthRestSource = restVertices; toolCurveHash = hash; toolStrengthsPrepared = true;
             toolFeatureStrengths = new float[restVertices.Length];
-            for (int i = 0; i < toolFeatureStrengths.Length; i++) toolFeatureStrengths[i] = 1f;
-            if (toolFeatureCurves == null || detachedFromMesh != null) return (float[])toolFeatureStrengths.Clone();
+            for (int i = 0; i < toolFeatureStrengths.Length; i++)
+            {
+                toolFeatureStrengths[i] = 1f;
+            }
+            if (toolFeatureCurves == null || detachedFromMesh != null) return;
             for (int curveIndex = 0; curveIndex < 3; curveIndex++)
             {
                 var points = toolFeatureCurves.GetSampledEditableCurve(curveIndex);
@@ -711,7 +821,6 @@ namespace DeformableImage
                     toolFeatureStrengths[i] = Mathf.Min(toolFeatureStrengths[i], FeatureBoundaryMath.StretchStrength(distance));
                 }
             }
-            return (float[])toolFeatureStrengths.Clone();
         }
 
         public float ToolStretchStrengthAt(Vector3 currentLocalPoint)
@@ -885,16 +994,137 @@ namespace DeformableImage
                 return false;
             }
 
-            distances = new float[logicalVertices.Length];
-            for (int index = 0; index < distances.Length; index++)
+            distances = BuildBrushDistances(logicalVertices, currentLocalPoint, restPoint, maximumDistance, seed, -1, -1);
+            return true;
+        }
+
+        internal readonly struct ManualDragHit
+        {
+            public readonly Vector2 MaterialPoint;
+            public readonly int Triangle;
+
+            public ManualDragHit(Vector2 materialPoint, int triangle)
             {
-                distances[index] = float.PositiveInfinity;
+                MaterialPoint = materialPoint;
+                Triangle = triangle;
+            }
+        }
+
+        internal float[] BuildManualDragDistances(ManualDragHit hit, float radius, out float[] eyeWeights)
+        {
+            eyeWeights = null;
+            if (!hasAppliedCuts) return null;
+            EnsureDeformationGraph();
+            List<CutBarrier> eyeCuts = BuildManualEyeWeights(hit.MaterialPoint, radius, out eyeWeights);
+            return BuildBrushDistances(restVertices, hit.MaterialPoint, hit.MaterialPoint, radius * 1.5f,
+                logicalTriangles[hit.Triangle], logicalTriangles[hit.Triangle + 1], logicalTriangles[hit.Triangle + 2], eyeCuts);
+        }
+
+        private List<CutBarrier> BuildManualEyeWeights(Vector2 grip, float radius, out float[] weights)
+        {
+            weights = null;
+            ResolveToolFeatureCurves();
+            if (toolFeatureCurves == null) return null;
+
+            List<CutBarrier> eyeCuts = null;
+            float radiusSquared = radius * radius;
+            for (int eye = 0; eye < 2; eye++)
+            {
+                var guide = toolFeatureCurves.GetSampledEditableCurve(eye);
+                if (guide.Count < 2) continue;
+                CutBarrier nearest = null;
+                Vector2 axis = default;
+                float nearestDistance = radiusSquared;
+                foreach (CutBarrier cut in openCutBarriers)
+                {
+                    if (!MatchesEyeCut(cut, guide, false) && !MatchesEyeCut(cut, guide, true)) continue;
+                    Vector2 direction = (cut.Points[cut.Points.Length - 1] - cut.Points[0]).normalized;
+                    float distance = float.PositiveInfinity;
+                    bool ordered = true;
+                    for (int i = 1; i < cut.Points.Length; i++)
+                    {
+                        if (Vector2.Dot(cut.Points[i] - cut.Points[i - 1], direction) <= 0.00001f)
+                        {
+                            ordered = false;
+                            break;
+                        }
+                        distance = Mathf.Min(distance, DistanceSquaredToSegment(grip, cut.Points[i - 1], cut.Points[i]));
+                    }
+                    if (!ordered || distance >= nearestDistance) continue;
+                    nearest = cut;
+                    nearestDistance = distance;
+                    axis = direction;
+                }
+                if (nearest == null || (eyeCuts != null && eyeCuts.Contains(nearest))) continue;
+                if (eyeCuts == null)
+                {
+                    eyeCuts = new List<CutBarrier>(2);
+                    weights = new float[restVertices.Length];
+                    for (int i = 0; i < weights.Length; i++) weights[i] = 1f;
+                }
+                eyeCuts.Add(nearest);
+                ApplyEyeCutWeights(nearest, axis, grip, radiusSquared, weights);
+            }
+            return eyeCuts;
+        }
+
+        private void ApplyEyeCutWeights(CutBarrier cut, Vector2 axis, Vector2 grip, float radiusSquared, float[] weights)
+        {
+            Vector2[] path = cut.Points;
+            Vector2 origin = path[0];
+            Vector2 normal = new Vector2(-axis.y, axis.x);
+            float length = Vector2.Dot(path[path.Length - 1] - origin, axis);
+            float gripSide = HeightFromCut(grip, out float gripAlong);
+            float separation = gripAlong >= 0f && gripAlong <= length ? 1f
+                : Mathf.SmoothStep(0f, 1f, Mathf.Abs(gripSide) / cut.Radius);
+
+            for (int i = 0; i < weights.Length; i++)
+            {
+                Vector2 vertex = restVertices[i];
+                if ((vertex - grip).sqrMagnitude >= radiusSquared) continue;
+                // The cut sides are independent in the slit. Beyond its tips the
+                // two surfaces are continuous, so both sides share the corner motion.
+                float side = HeightFromCut(vertex, out float along);
+                float fromTip = Mathf.Min(along, length - along);
+                if (side * gripSide < 0f)
+                    weights[i] *= Mathf.Lerp(1f,
+                        FeatureBoundaryMath.ManualEyeOppositeTransfer(fromTip, Mathf.Abs(side), length), separation);
             }
 
-            float seedDistance = Vector2.Distance((Vector2)currentLocalPoint, (Vector2)logicalVertices[seed]);
-            distances[seed] = seedDistance;
-            MinDistanceHeap heap = new MinDistanceHeap();
-            heap.Push(seed, seedDistance);
+            float HeightFromCut(Vector2 point, out float along)
+            {
+                along = Vector2.Dot(point - origin, axis);
+                for (int i = 1; i < path.Length; i++)
+                {
+                    Vector2 end = path[i];
+                    float endAlong = Vector2.Dot(end - origin, axis);
+                    if (along > endAlong && i < path.Length - 1) continue;
+                    Vector2 start = path[i - 1];
+                    float startAlong = Vector2.Dot(start - origin, axis);
+                    Vector2 pointOnCut = Vector2.LerpUnclamped(start, end, (along - startAlong) / (endAlong - startAlong));
+                    return Vector2.Dot(point - pointOnCut, normal);
+                }
+                return 0f;
+            }
+        }
+
+        private float[] BuildBrushDistances(Vector3[] metricVertices, Vector2 brushPoint, Vector2 restPoint,
+            float maximumDistance, int seedA, int seedB, int seedC, List<CutBarrier> smoothEyeCuts = null)
+        {
+            var distances = new float[metricVertices.Length];
+            for (int i = 0; i < distances.Length; i++) distances[i] = float.PositiveInfinity;
+            var heap = new MinDistanceHeap();
+            Seed(seedA);
+            Seed(seedB);
+            Seed(seedC);
+
+            void Seed(int vertex)
+            {
+                if (vertex < 0) return;
+                float distance = Vector2.Distance(brushPoint, metricVertices[vertex]);
+                distances[vertex] = distance;
+                heap.Push(vertex, distance);
+            }
             float distanceLimit = Mathf.Max(0.001f, maximumDistance);
 
             while (heap.TryPop(out int current, out float currentDistance))
@@ -914,8 +1144,8 @@ namespace DeformableImage
                 {
                     int neighbour = neighbours[neighbourIndex];
                     float edgeLength = Vector2.Distance(
-                        (Vector2)logicalVertices[current],
-                        (Vector2)logicalVertices[neighbour]);
+                        (Vector2)metricVertices[current],
+                        (Vector2)metricVertices[neighbour]);
                     float candidate = currentDistance + edgeLength;
                     if (candidate >= distances[neighbour] || candidate > distanceLimit)
                     {
@@ -934,13 +1164,44 @@ namespace DeformableImage
             for (int index = 0; index < distances.Length; index++)
             {
                 if (!float.IsPositiveInfinity(distances[index])
-                    && IsBlockedByOpenCutCenterline(restPoint, restVertices[index]))
+                    && IsBlockedByOpenCutCenterline(restPoint, restVertices[index], smoothEyeCuts))
                 {
                     distances[index] = float.PositiveInfinity;
                 }
             }
 
-            return true;
+            return distances;
+        }
+
+        internal bool TryPickManualDragSurface(Ray ray, out ManualDragHit hit)
+        {
+            hit = default;
+            float nearest = float.PositiveInfinity;
+            bool nearestFront = false;
+            for (int i = 0; i + 2 < logicalTriangles.Length; i += 3)
+            {
+                int a = logicalTriangles[i], b = logicalTriangles[i + 1], c = logicalTriangles[i + 2];
+                Vector3 u = logicalVertices[b] - logicalVertices[a], v = logicalVertices[c] - logicalVertices[a];
+                Vector3 perpendicular = Vector3.Cross(ray.direction, v);
+                float determinant = Vector3.Dot(u, perpendicular);
+                if (Mathf.Abs(determinant) < 1e-10f) continue;
+                Vector3 fromA = ray.origin - logicalVertices[a];
+                float wb = Vector3.Dot(fromA, perpendicular) / determinant;
+                if (wb < -0.00001f || wb > 1.00001f) continue;
+                Vector3 cross = Vector3.Cross(fromA, u);
+                float wc = Vector3.Dot(ray.direction, cross) / determinant;
+                if (wc < -0.00001f || wb + wc > 1.00001f) continue;
+                float distance = Vector3.Dot(v, cross) / determinant;
+                bool front = determinant > 0f;
+                if (distance < 0f || distance > nearest + 1e-6f
+                    || (Mathf.Abs(nearest - distance) <= 1e-6f && (nearestFront || !front))) continue;
+                Vector2 material = restVertices[a] * (1f - wb - wc) + restVertices[b] * wb + restVertices[c] * wc;
+                if (!IsVisibleMaterialAtRestPoint(material)) continue;
+                nearest = distance;
+                nearestFront = front;
+                hit = new ManualDragHit(material, i);
+            }
+            return !float.IsPositiveInfinity(nearest);
         }
 
         /// <summary>
@@ -1019,6 +1280,12 @@ namespace DeformableImage
             {
                 return false;
             }
+
+            return IsVisibleMaterialAtRestPoint(restPoint);
+        }
+
+        private bool IsVisibleMaterialAtRestPoint(Vector2 restPoint)
+        {
 
             if (alphaMask.Length == 0 || alphaMaskWidth <= 0 || alphaMaskHeight <= 0)
             {
@@ -2601,11 +2868,13 @@ namespace DeformableImage
             return false;
         }
 
-        private bool IsBlockedByOpenCutCenterline(Vector2 segmentStart, Vector2 segmentEnd)
+        private bool IsBlockedByOpenCutCenterline(Vector2 segmentStart, Vector2 segmentEnd, List<CutBarrier> ignoredCuts = null)
         {
             for (int barrierIndex = 0; barrierIndex < openCutBarriers.Count; barrierIndex++)
             {
-                Vector2[] points = openCutBarriers[barrierIndex].Points;
+                CutBarrier cut = openCutBarriers[barrierIndex];
+                if (ignoredCuts != null && ignoredCuts.Contains(cut)) continue;
+                Vector2[] points = cut.Points;
                 for (int pointIndex = 0; pointIndex + 1 < points.Length; pointIndex++)
                 {
                     if (SegmentsIntersect(
@@ -3185,6 +3454,7 @@ namespace DeformableImage
 
         private void CreateSolidCutMask()
         {
+            cutPreviewActive = false;
             hasAppliedCuts = false;
             openCutBarriers.Clear();
             InvalidateDeformationGraph();
@@ -3210,6 +3480,66 @@ namespace DeformableImage
             }
 
             UploadCutMask();
+        }
+
+        /// <summary>Visual-only transparent knife trail. Never changes persistent masks,
+        /// topology, incision barriers, picking or layer bindings.</summary>
+        public void PreviewOpenCut(IList<Vector2> path, int firstSegment, float worldWidth)
+        {
+            if (path == null || path.Count < 2 || cutMaskPixels.Length == 0) return;
+            bool began = !cutPreviewActive;
+            if (began)
+            {
+                if (cutPreviewTexture == null || cutPreviewTexture.width != alphaMaskWidth || cutPreviewTexture.height != alphaMaskHeight)
+                {
+                    DestroyGeneratedObject(cutPreviewTexture);
+                    cutPreviewTexture = new Texture2D(alphaMaskWidth, alphaMaskHeight, TextureFormat.RGBA32, false, true)
+                    { name = "Temporary Transparent Knife Trail", hideFlags = HideFlags.DontSave,
+                        filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+                    cutPreviewPixels = new Color32[cutMaskPixels.Length];
+                }
+                Array.Copy(cutMaskPixels, cutPreviewPixels, cutMaskPixels.Length);
+                cutPreviewActive = true;
+            }
+            int minX = alphaMaskWidth, minY = alphaMaskHeight, maxX = -1, maxY = -1;
+            float radius = Mathf.Max(0.0005f, worldWidth * 0.5f);
+            for (int s = Mathf.Max(0, firstSegment); s + 1 < path.Count; s++)
+            {
+                Vector2 a = gridMinimum + Vector2.Scale(path[s], gridSize);
+                Vector2 b = gridMinimum + Vector2.Scale(path[s + 1], gridSize);
+                int x0 = Mathf.Clamp(Mathf.FloorToInt((Mathf.Min(path[s].x, path[s + 1].x) - radius / gridSize.x) * alphaMaskWidth), 0, alphaMaskWidth - 1);
+                int x1 = Mathf.Clamp(Mathf.CeilToInt((Mathf.Max(path[s].x, path[s + 1].x) + radius / gridSize.x) * alphaMaskWidth), 0, alphaMaskWidth - 1);
+                int y0 = Mathf.Clamp(Mathf.FloorToInt((Mathf.Min(path[s].y, path[s + 1].y) - radius / gridSize.y) * alphaMaskHeight), 0, alphaMaskHeight - 1);
+                int y1 = Mathf.Clamp(Mathf.CeilToInt((Mathf.Max(path[s].y, path[s + 1].y) + radius / gridSize.y) * alphaMaskHeight), 0, alphaMaskHeight - 1);
+                for (int y = y0; y <= y1; y++) for (int x = x0; x <= x1; x++)
+                {
+                    int index = y * alphaMaskWidth + x;
+                    if (cutPreviewPixels[index].a == 0) continue;
+                    Vector2 p = gridMinimum + Vector2.Scale(new Vector2((x + 0.5f) / alphaMaskWidth, (y + 0.5f) / alphaMaskHeight), gridSize);
+                    if (DistanceSquaredToSegment(p, a, b) > radius * radius) continue;
+                    cutPreviewPixels[index] = new Color32(0, 0, 0, 0);
+                    minX = Mathf.Min(minX, x); maxX = Mathf.Max(maxX, x);
+                    minY = Mathf.Min(minY, y); maxY = Mathf.Max(maxY, y);
+                }
+            }
+            if (began) cutPreviewTexture.SetPixels32(cutPreviewPixels);
+            else if (maxX >= minX && maxY >= minY)
+            {
+                int width = maxX - minX + 1, height = maxY - minY + 1;
+                var block = new Color32[width * height];
+                for (int y = 0; y < height; y++) Array.Copy(cutPreviewPixels, (minY + y) * alphaMaskWidth + minX, block, y * width, width);
+                cutPreviewTexture.SetPixels32(minX, minY, width, height, block);
+            }
+            else return;
+            cutPreviewTexture.Apply(false, false);
+            if (began) ApplyTextures();
+        }
+
+        public void EndCutPreview()
+        {
+            if (!cutPreviewActive) return;
+            cutPreviewActive = false;
+            ApplyTextures();
         }
 
         private void UploadCutMask()
@@ -3931,7 +4261,9 @@ namespace DeformableImage
 
             frontProperties.Clear();
             frontProperties.SetTexture("_MainTex", frontSprite != null ? frontSprite.texture : Texture2D.whiteTexture);
-            frontProperties.SetTexture("_CutMask", cutMaskTexture != null ? cutMaskTexture : Texture2D.whiteTexture);
+            Texture displayedCutMask = cutPreviewActive && cutPreviewTexture != null ? cutPreviewTexture
+                : (Texture)(cutMaskTexture != null ? cutMaskTexture : Texture2D.whiteTexture);
+            frontProperties.SetTexture("_CutMask", displayedCutMask);
             frontProperties.SetTexture("_CutVisualMask", cutVisualTexture != null ? cutVisualTexture : Texture2D.blackTexture);
             frontProperties.SetColor("_CutVisualColor", cutVisualizationColor);
             frontProperties.SetColor("_Color", tint);
@@ -3943,7 +4275,7 @@ namespace DeformableImage
             Sprite actualBack = backSprite != null ? backSprite : frontSprite;
             backProperties.Clear();
             backProperties.SetTexture("_MainTex", actualBack != null ? actualBack.texture : Texture2D.whiteTexture);
-            backProperties.SetTexture("_CutMask", cutMaskTexture != null ? cutMaskTexture : Texture2D.whiteTexture);
+            backProperties.SetTexture("_CutMask", displayedCutMask);
             backProperties.SetTexture("_CutVisualMask", cutVisualTexture != null ? cutVisualTexture : Texture2D.blackTexture);
             backProperties.SetColor("_CutVisualColor", cutVisualizationColor);
             backProperties.SetColor("_Color", tint);
@@ -3952,12 +4284,52 @@ namespace DeformableImage
             backProperties.SetFloat("_SpecularStrength", specularStrength);
             backProperties.SetFloat("_Smoothness", surfaceSmoothness);
 
+            float showDragWeights = ShowsDragWeights ? 1f : 0f;
+            frontProperties.SetFloat("_ShowDragWeights", showDragWeights);
+            backProperties.SetFloat("_ShowDragWeights", showDragWeights);
+            meshRenderer.SetPropertyBlock(frontProperties, 0);
+            meshRenderer.SetPropertyBlock(backProperties, 1);
+        }
+
+        internal void SetDragWeightDisplay(float[] weights)
+        {
+            if (generatedMesh == null || meshRenderer == null) return;
+            if (weights != null && weights.Length == logicalVertices.Length)
+            {
+                int count = weights.Length;
+                if (dragWeightColors.Length != count * 2) dragWeightColors = new Color32[count * 2];
+                for (int i = 0; i < count; i++)
+                {
+                    byte weight = (byte)Mathf.RoundToInt(Mathf.Clamp01(weights[i]) * 255f);
+                    dragWeightColors[i] = dragWeightColors[i + count] = new Color32(weight, 0, 0, 255);
+                }
+                generatedMesh.colors32 = dragWeightColors;
+                dragWeightDisplayMesh = generatedMesh;
+            }
+            else
+            {
+                if (dragWeightDisplayMesh == null) return;
+                dragWeightDisplayMesh = null;
+            }
+
+            // Preserve the current cut mask and any wrinkle properties on the renderer.
+            frontProperties ??= new MaterialPropertyBlock();
+            backProperties ??= new MaterialPropertyBlock();
+            meshRenderer.GetPropertyBlock(frontProperties, 0);
+            meshRenderer.GetPropertyBlock(backProperties, 1);
+            float visible = ShowsDragWeights ? 1f : 0f;
+            frontProperties.SetFloat("_ShowDragWeights", visible);
+            backProperties.SetFloat("_ShowDragWeights", visible);
             meshRenderer.SetPropertyBlock(frontProperties, 0);
             meshRenderer.SetPropertyBlock(backProperties, 1);
         }
 
         private void ClearMesh()
         {
+            cutPreviewActive = false;
+            DestroyGeneratedObject(cutPreviewTexture);
+            cutPreviewTexture = null;
+            cutPreviewPixels = Array.Empty<Color32>();
             restVertices = Array.Empty<Vector3>();
             poseRestVertices = Array.Empty<Vector3>();
             logicalVertices = Array.Empty<Vector3>();
@@ -3997,6 +4369,10 @@ namespace DeformableImage
 
         private void DestroyGeneratedResources()
         {
+            cutPreviewActive = false;
+            DestroyGeneratedObject(cutPreviewTexture);
+            cutPreviewTexture = null;
+            cutPreviewPixels = Array.Empty<Color32>();
             if (meshFilter != null && meshFilter.sharedMesh == generatedMesh)
             {
                 meshFilter.sharedMesh = null;
